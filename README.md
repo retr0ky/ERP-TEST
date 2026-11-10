@@ -35,4 +35,30 @@ static/style.css  single stylesheet, includes print styles
 - First run seeds 5 sample products. To start blank: delete `erp.db`, comment out `SEED`, or delete the products in the UI.
 - Prices are stored as REAL; a cart is kept in the Flask session, so an abandoned cart lives only in that browser.
 - Deleting a product keeps its past sale lines (`product_id` becomes NULL), so history survives.
-- `app.secret_key` is a placeholder; harmless while you listen on 127.0.0.1 only.
+- `ERP_SECRET_KEY` is read from the environment; without it a random one is generated per boot.
+
+## Hosting (Vercel + Turso)
+
+Vercel's disk is read-only, so `erp.db` cannot persist there. Set `TURSO_URL` +
+`TURSO_TOKEN` and the same code writes to a hosted libsql (Turso) database instead.
+
+```
+python3 sync_to_turso.py      # push your local erp.db into Turso (keeps ids, safe to re-run)
+```
+
+Environment variables (see `.env.example`; `.env` is read locally and never committed):
+
+| var | what it does |
+| --- | --- |
+| `TURSO_URL` / `TURSO_TOKEN` | use the hosted DB instead of `erp.db` |
+| `ERP_PUBLIC=1` | forces a login gate, secure cookies, and requires the two vars below |
+| `ERP_SECRET_KEY` | stable sessions across cold starts |
+| `ERP_PASSWORD` | the single-user password/PIN |
+| `ERP_HOST`, `ERP_PORT`, `ERP_DEBUG` | local `python3 app.py` overrides |
+
+Vercel: import the repo, add those env vars, deploy; `vercel.json` routes everything to
+`api/index.py` (`from app import app`). Local production-style run: `gunicorn wsgi:app`.
+
+Tests: `python3 tests/test_search.py` and `python3 tests/test_leasing.py` - they run
+against whichever backend the environment selects, so run them once with `TURSO_URL`
+set to prove the hosted database behaves.

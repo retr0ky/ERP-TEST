@@ -11,7 +11,25 @@ from pathlib import Path
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, session, url_for
 
 BASE = Path(__file__).resolve().parent
+
+
+def load_dotenv():
+    """Local-only .env loader; Vercel sets real environment variables instead."""
+    path = BASE / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key, value)
+
+
+load_dotenv()
 DB_PATH = Path(os.environ.get("ERP_DB") or (BASE / "erp.db"))
+# Turso/libsql takes over as soon as TURSO_URL is set (alias: TURSO_DATABASE_URL).
+TURSO_URL = os.environ.get("TURSO_URL") or os.environ.get("TURSO_DATABASE_URL") or ""
+TURSO_TOKEN = os.environ.get("TURSO_TOKEN") or os.environ.get("TURSO_AUTH_TOKEN") or ""
 CURRENCY = "₮"
 VAT_PERCENT = 10.0
 
@@ -90,6 +108,9 @@ CREATE TABLE IF NOT EXISTS products (
     price REAL NOT NULL DEFAULT 0,
     qty INTEGER NOT NULL DEFAULT 0,
     low_stock_at INTEGER NOT NULL DEFAULT 5,
+    n_search TEXT NOT NULL DEFAULT '',
+    n_sku TEXT NOT NULL DEFAULT '',
+    n_barcode TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE TABLE IF NOT EXISTS categories (
@@ -113,6 +134,7 @@ CREATE TABLE IF NOT EXISTS sales (
     item_count INTEGER NOT NULL,
     customer_phone TEXT,
     customer_note TEXT,
+    n_search TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE TABLE IF NOT EXISTS payments (
@@ -120,7 +142,8 @@ CREATE TABLE IF NOT EXISTS payments (
     sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
     method TEXT NOT NULL,
     amount REAL NOT NULL,
-    note TEXT
+    note TEXT,
+    n_note TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sale_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,7 +152,8 @@ CREATE TABLE IF NOT EXISTS sale_items (
     name TEXT NOT NULL,
     price REAL NOT NULL,
     qty INTEGER NOT NULL,
-    line_total REAL NOT NULL
+    line_total REAL NOT NULL,
+    n_name TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS payment_methods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,12 +197,28 @@ PRODUCT_COLUMNS = [
     ("category_id", "INTEGER REFERENCES categories(id) ON DELETE SET NULL"),
     ("supplier_id", "INTEGER REFERENCES suppliers(id) ON DELETE SET NULL"),
     ("active", "INTEGER NOT NULL DEFAULT 1"),
+    ("n_search", "TEXT NOT NULL DEFAULT ''"),
+    ("n_sku", "TEXT NOT NULL DEFAULT ''"),
+    ("n_barcode", "TEXT NOT NULL DEFAULT ''"),
 ]
 PAYMENT_COLUMNS = [
     ("commission_percent", "REAL NOT NULL DEFAULT 0"),
     ("commission_mode", "TEXT"),
     ("commission_amount", "REAL NOT NULL DEFAULT 0"),
     ("note", "TEXT"),
+    ("n_note", "TEXT NOT NULL DEFAULT ''"),
+]
+SALE_COLUMNS = [
+    ("vat_amount", "REAL NOT NULL DEFAULT 0"),
+    ("customer_phone", "TEXT"),
+    ("customer_note", "TEXT"),
+    ("paid", "REAL NOT NULL DEFAULT 0"),
+    ("change", "REAL NOT NULL DEFAULT 0"),
+    ("n_search", "TEXT NOT NULL DEFAULT ''"),
+]
+SALE_ITEM_COLUMNS = [
+    ("set_id", "INTEGER REFERENCES sets(id) ON DELETE SET NULL"),
+    ("n_name", "TEXT NOT NULL DEFAULT ''"),
 ]
 PAYMENT_SEED = [
     ("cash", "Cash", 0, "ABSORBED", 1, 10, 0),
@@ -198,12 +238,120 @@ def close_db(_exc):
         conn.close()
 
 
+class Row:
+    """sqlite3.Row lookalike - dict-style rows from local SQLite and Turso alike."""
+    __slots__ = ("_names", "_vals")
+
+    def __init__(self, names, vals):
+        self._names = names
+        self._vals = tuple(vals)
+
+    def keys(self):
+        return list(self._names)
+
+    def items(self):
+        return list(zip(self._names, self._vals))
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._vals[key]
+        return self._vals[self._names.index(key)]
+
+    def __contains__(self, key):
+        return key in self._names if isinstance(key, str) else key in self._vals
+
+    def __iter__(self):
+        return iter(self._vals)
+
+    def __len__(self):
+        return len(self._vals)
+
+    def __repr__(self):
+        return repr(self._vals)
+
+
+class Result:
+    """One cursor face for both sqlite3 and libsql."""
+
+    def __init__(self, cur):
+        self.lastrowid = cur.lastrowid
+        self.rowcount = cur.rowcount
+        # libsql reports some column names uppercased (key -> KEY); the app speaks lowercase.
+        self._names = [str(d[0] or "").lower() for d in cur.description] if cur.description else []
+        self._rows = cur.fetchall() if cur.description else []
+
+    def fetchall(self):
+        return [Row(self._names, r) for r in self._rows]
+
+    def fetchone(self):
+        return Row(self._names, self._rows[0]) if self._rows else None
+
+    def fetchmany(self, size=None):
+        take = len(self._rows) if size is None else size
+        out = [Row(self._names, r) for r in self._rows[:take]]
+        self._rows = self._rows[take:]
+        return out
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+def as_sqlite_error(exc):
+    """libsql reports constraint clashes as plain ValueError; keep one exception face."""
+    msg = str(exc)
+    if "SQLITE_CONSTRAINT" in msg or "UNIQUE constraint" in msg or "FOREIGN KEY" in msg:
+        return sqlite3.IntegrityError(msg)
+    return exc
+
+
+class DB:
+    """Thin adapter so a single code path serves local SQLite and hosted Turso."""
+
+    def __init__(self, conn):
+        self._c = conn
+
+    def _guard(self, fn, *args):
+        try:
+            return fn(*args)
+        except sqlite3.Error:
+            raise
+        except Exception as exc:
+            raise as_sqlite_error(exc) from exc
+
+    def execute(self, sql, args=()):
+        return Result(self._guard(self._c.execute, sql, tuple(args)))
+
+    def executemany(self, sql, seq):
+        return Result(self._guard(self._c.executemany, sql, [tuple(x) for x in seq]))
+
+    def executescript(self, sql):
+        self._guard(self._c.executescript, sql)
+
+    def commit(self):
+        self._guard(self._c.commit)
+
+    def rollback(self):
+        self._guard(self._c.rollback)
+
+    def close(self):
+        try:
+            self._c.close()
+        except Exception:
+            pass
+
+
+def connect():
+    if TURSO_URL:
+        import libsql
+        return DB(libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN))
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return DB(conn)
+
+
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        # SQLite's LIKE/LOWER only fold ASCII, so Cyrillic searches silently fail by case.
-        g.db.create_function("norm", 1, norm, deterministic=True)
+        g.db = connect()
     return g.db
 
 
@@ -224,8 +372,13 @@ def like_terms(text):
 
 
 def match_any(columns, value):
-    """(norm(col) LIKE ? OR ...) for one word across the given columns."""
-    clause = " OR ".join(f"norm({c}) LIKE ? ESCAPE '\\'" for c in columns)
+    """(col LIKE ? OR ...) for one word across already casefolded search columns.
+
+    The folds live in the rows (n_search / n_note / n_name) rather than in a
+    SQLite UDF, because Turso/libsql cannot register Python functions and its
+    own lower() leaves Cyrillic untouched.
+    """
+    clause = " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in columns)
     like = like_terms(value)
     return f"({clause})", [like] * len(columns)
 
@@ -241,7 +394,16 @@ def all_words(columns, raw):
 
 
 def product_columns():
-    return ["p.name", "IFNULL(p.sku,'')", "IFNULL(p.barcode,'')", "IFNULL(p.brand,'')"]
+    return ["p.n_search"]
+
+
+def blob_of(*parts):
+    """Casefolded haystack built from the searchable text of one row."""
+    return norm(" ".join(str(p if p is not None else "") for p in parts))
+
+
+def product_stamp(sku, name, barcode, brand):
+    return (blob_of(name, sku, barcode, brand), norm(sku), norm(barcode))
 
 
 def add_columns(conn, table, columns):
@@ -251,24 +413,42 @@ def add_columns(conn, table, columns):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+def backfill_search(conn):
+    """Fill the casefolded search columns for rows written before they existed.
+
+    Python casefolds Cyrillic correctly; SQLite lower() (and libsql's) does not,
+    which is why the fold has to happen here in Python and not in SQL.
+    """
+    for r in conn.execute("SELECT id, sku, name, barcode, brand FROM products"
+                          " WHERE n_search IS NULL OR n_search = ''").fetchall():
+        blob, n_sku, n_barcode = product_stamp(r["sku"], r["name"], r["barcode"], r["brand"])
+        conn.execute("UPDATE products SET n_search=?, n_sku=?, n_barcode=? WHERE id=?",
+                     (blob, n_sku, n_barcode, r["id"]))
+    for r in conn.execute("SELECT id, ref, customer_phone, customer_note FROM sales"
+                          " WHERE n_search IS NULL OR n_search = ''").fetchall():
+        conn.execute("UPDATE sales SET n_search=? WHERE id=?",
+                     (blob_of(r["ref"], r["customer_phone"], r["customer_note"]), r["id"]))
+    for r in conn.execute("SELECT id, name FROM sale_items"
+                          " WHERE n_name IS NULL OR n_name = ''").fetchall():
+        conn.execute("UPDATE sale_items SET n_name=? WHERE id=?", (norm(r["name"]), r["id"]))
+    for r in conn.execute("SELECT id, note FROM payments"
+                          " WHERE n_note IS NULL OR n_note = ''").fetchall():
+        conn.execute("UPDATE payments SET n_note=? WHERE id=?", (norm(r["note"]), r["id"]))
+
+
+def init_db(conn=None):
+    """Create/upgrade the schema on Turso (or on any connection you hand it)."""
+    own = conn is None
+    conn = conn or connect()
     conn.executescript(SCHEMA)
     add_columns(conn, "products", PRODUCT_COLUMNS)
     add_columns(conn, "payments", PAYMENT_COLUMNS)
-    add_columns(conn, "sale_items", [("set_id", "INTEGER REFERENCES sets(id) ON DELETE SET NULL")])
+    add_columns(conn, "sale_items", SALE_ITEM_COLUMNS)
 
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(sales)")}
-    if "vat_amount" not in cols:
-        conn.execute("ALTER TABLE sales ADD COLUMN vat_amount REAL NOT NULL DEFAULT 0")
-    add_columns(conn, "sales", [("customer_phone", "TEXT"),
-                                ("customer_note", "TEXT")])
-    for name, decl in (("paid", "REAL NOT NULL DEFAULT 0"),
-                       ("change", "REAL NOT NULL DEFAULT 0")):
-        if name not in cols:
-            conn.execute(f"ALTER TABLE sales ADD COLUMN {name} {decl}")
-            conn.execute("UPDATE sales SET paid = total WHERE paid = 0")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sales)").fetchall()}
+    add_columns(conn, "sales", SALE_COLUMNS)
+    if "paid" not in cols or "change" not in cols:
+        conn.execute("UPDATE sales SET paid = total WHERE paid = 0")
 
     add_columns(conn, "payment_methods",
                 [("requires_note", "INTEGER NOT NULL DEFAULT 0")])
@@ -276,11 +456,15 @@ def init_db():
         "INSERT OR IGNORE INTO payment_methods"
         " (key, label, commission_percent, commission_mode, active, sort, requires_note)"
         " VALUES (?, ?, ?, ?, ?, ?, ?)", PAYMENT_SEED)
-    for r in conn.execute("SELECT key FROM payment_methods").fetchall():
-        conn.execute("UPDATE payment_methods SET requires_note = ? WHERE key = ?",
-                     (1 if r["key"] in NOTE_REQUIRED_KEYS else 0, r["key"]))
+    keys = ",".join(f"'{k}'" for k in sorted(NOTE_REQUIRED_KEYS))
+    conn.execute(f"UPDATE payment_methods SET requires_note = 1"
+                 f" WHERE key IN ({keys}) AND requires_note <> 1")
+    conn.execute(f"UPDATE payment_methods SET requires_note = 0"
+                 f" WHERE key NOT IN ({keys}) AND requires_note <> 0")
+    backfill_search(conn)
     conn.commit()
-    conn.close()
+    if own:
+        conn.close()
 
 
 def payment_rows(active_only=False):
@@ -489,8 +673,10 @@ def product_new():
         try:
             db().execute(
                 """INSERT INTO products (sku, name, cost, price, qty, low_stock_at, barcode,
-                                         brand, model, specifications, category_id, supplier_id, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""", values)
+                                         brand, model, specifications, category_id, supplier_id,
+                                         active, n_search, n_sku, n_barcode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+                (*values, *product_stamp(values[0], values[1], values[6], values[7])))
             db().commit()
         except sqlite3.IntegrityError:
             db().rollback()
@@ -516,8 +702,10 @@ def product_edit(pid):
         try:
             db().execute(
                 """UPDATE products SET sku=?, name=?, cost=?, price=?, qty=?, low_stock_at=?,
-                       barcode=?, brand=?, model=?, specifications=?, category_id=?, supplier_id=?
-                   WHERE id=?""", (*values, pid))
+                       barcode=?, brand=?, model=?, specifications=?, category_id=?, supplier_id=?,
+                       n_search=?, n_sku=?, n_barcode=?
+                   WHERE id=?""",
+                (*values, *product_stamp(values[0], values[1], values[6], values[7]), pid))
             db().commit()
         except sqlite3.IntegrityError:
             db().rollback()
@@ -1065,9 +1253,8 @@ def pos_scan():
         flash("Scan a barcode or type a SKU.", "error")
         return pos_redirect()
     rows = db().execute("""SELECT * FROM products WHERE active = 1
-                           AND (norm(IFNULL(barcode,'')) = norm(?)
-                                OR norm(IFNULL(sku,'')) = norm(?))
-                           ORDER BY name""", (value, value)).fetchall()
+                           AND (n_barcode = ? OR n_sku = ?)
+                           ORDER BY name""", (norm(value), norm(value))).fetchall()
     if not rows:
         flash(f"Barcode scan “{value}” - no product matches.", "error")
     elif len(rows) > 1:
@@ -1486,35 +1673,37 @@ def pos_checkout():
     item_count = sum(q for _, q in entries) + sum(q for _, q in cart_sets)
     cur = conn.execute(
         """INSERT INTO sales (ref, total, paid, change, item_count, vat_amount,
-                              customer_phone, customer_note)
-           VALUES ('', ?, ?, ?, ?, ?, ?, ?)""",
+                              customer_phone, customer_note, n_search)
+           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?)""",
         (total, paid, max(paid - total, 0), item_count, vat,
-         cust_phone or None, cust_note or None))
+         cust_phone or None, cust_note or None, blob_of("", cust_phone, cust_note)))
     sale_id = cur.lastrowid
     ref = f"SALE-{sale_id:05d}"
-    conn.execute("UPDATE sales SET ref = ? WHERE id = ?", (ref, sale_id))
+    conn.execute("UPDATE sales SET ref = ?, n_search = ? WHERE id = ?",
+                 (ref, blob_of(ref, cust_phone, cust_note), sale_id))
     pm_map = payment_map()
     for p, qty in entries:
         conn.execute(
-            "INSERT INTO sale_items (sale_id, product_id, name, price, qty, line_total)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (sale_id, p["id"], p["name"], p["price"], qty, p["price"] * qty))
+            "INSERT INTO sale_items (sale_id, product_id, name, price, qty, line_total, n_name)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sale_id, p["id"], p["name"], p["price"], qty, p["price"] * qty, norm(p["name"])))
     for s, qty in cart_sets:
         conn.execute(
-            """INSERT INTO sale_items (sale_id, product_id, set_id, name, price, qty, line_total)
-               VALUES (?, NULL, ?, ?, ?, ?, ?)""",
-            (sale_id, s["id"], s["name"], s["unit_price"], qty, s["unit_price"] * qty))
+            """INSERT INTO sale_items (sale_id, product_id, set_id, name, price, qty, line_total, n_name)
+               VALUES (?, NULL, ?, ?, ?, ?, ?, ?)""",
+            (sale_id, s["id"], s["name"], s["unit_price"], qty, s["unit_price"] * qty, norm(s["name"])))
     for pid, qty in need.items():
         conn.execute("UPDATE products SET qty = qty - ? WHERE id = ?", (qty, pid))
     for pay in pays:
         pm = pm_map.get(pay["method"]) or {}
+        note = clean_pay_note(pay.get("note"))
         conn.execute(
             """INSERT INTO payments (sale_id, method, amount, commission_percent,
-                                     commission_mode, commission_amount, note)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                     commission_mode, commission_amount, note, n_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (sale_id, pay["method"], pay["amount"], pm.get("commission_percent") or 0,
              pm.get("commission_mode"), absorbed_of(pm, pay["amount"]) + surcharge_of(pm, pay["amount"]),
-             clean_pay_note(pay.get("note")) or None))
+             note or None, norm(note)))
     conn.commit()
     session["cart"] = {}
     session["sets"] = {}
@@ -1531,7 +1720,7 @@ def sales():
     methods = {r["key"]: r["label"] for r in payment_rows()}
     q = request.args.get("q", "").strip()
     if q:
-        head = ["sales.ref", "IFNULL(sales.customer_phone,'')", "IFNULL(sales.customer_note,'')"]
+        head = ["sales.n_search"]
         clauses, args = [], []
         for word in query_words(q):
             clause, extra = match_any(head, word)
@@ -1539,10 +1728,10 @@ def sales():
             group = (clause
                      + " OR EXISTS (SELECT 1 FROM payments pn"
                      "             WHERE pn.sale_id = sales.id"
-                     "               AND norm(IFNULL(pn.note,'')) LIKE ? ESCAPE '\\')"
+                     "               AND pn.n_note LIKE ? ESCAPE '\\')"
                      + " OR EXISTS (SELECT 1 FROM sale_items si"
                      "             WHERE si.sale_id = sales.id"
-                     "               AND norm(IFNULL(si.name,'')) LIKE ? ESCAPE '\\')")
+                     "               AND si.n_name LIKE ? ESCAPE '\\')")
             clauses.append(f"({group})")
             args += extra + [like, like]
         rows = [dict(r) for r in db().execute(

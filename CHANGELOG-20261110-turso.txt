@@ -1,0 +1,23 @@
+ERP session 2026-11-10 (Turso/libsql port)
+
+- app.py now has one DB face (DB/Result/Row) over either local SQLite or hosted Turso.
+  TURSO_URL (+TURSO_TOKEN) switches the backend; with no TURSO_URL it still uses erp.db.
+  .env is read for local runs only and is gitignored.
+- The SQLite norm() UDF is gone - libsql cannot register Python functions and its own
+  lower() does not fold Cyrillic. Instead every searchable row carries casefolded
+  columns computed in Python: products.n_search/n_sku/n_barcode, sales.n_search,
+  sale_items.n_name, payments.n_note. Same SQL runs on both backends.
+- init_db() works remotely (SCHEMA + ALTER TABLE migrations) and backfills those
+  columns for rows written before they existed.
+- libsql quirks handled: column names arrive uppercased (key -> KEY) so result names
+  are lowercased; constraint errors arrive as plain ValueError so they are re-raised
+  as sqlite3.IntegrityError; rollback/executescript/lastrowid verified against Turso.
+- sync_to_turso.py: pushes erp.db into Turso (ids preserved, idempotent) and drops the
+  132 set_products rows that pointed at long-deleted sets/products - the local file
+  never enforced FKs, Turso does.
+- libsql>=0.1.11 added to requirements.txt.
+- Tests moved into tests/ and no longer read erp.db directly; green on Turso and on
+  local SQLite: tests/test_search.py FAILS: none, tests/test_leasing.py FAILS: none.
+
+Vercel env to set: TURSO_URL, TURSO_TOKEN, ERP_PUBLIC=1, ERP_SECRET_KEY, ERP_PASSWORD.
+Rotate the Turso token that was pasted into chat.
