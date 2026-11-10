@@ -99,7 +99,15 @@ def asset_v(filename):
 
 app.jinja_env.globals["asset_v"] = asset_v
 
+# Bump this whenever SCHEMA/migrations below change - it is what lets a hosted
+# database skip the whole migration crawl on boot (6.7s of round trips -> 2).
+SCHEMA_VERSION = "3"
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sku TEXT UNIQUE,
@@ -440,6 +448,12 @@ def init_db(conn=None):
     """Create/upgrade the schema on Turso (or on any connection you hand it)."""
     own = conn is None
     conn = conn or connect()
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    marker = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if marker is not None and marker["value"] == SCHEMA_VERSION:
+        if own:
+            conn.close()
+        return                       # already built: 2 round trips instead of ~30
     conn.executescript(SCHEMA)
     add_columns(conn, "products", PRODUCT_COLUMNS)
     add_columns(conn, "payments", PAYMENT_COLUMNS)
@@ -462,6 +476,8 @@ def init_db(conn=None):
     conn.execute(f"UPDATE payment_methods SET requires_note = 0"
                  f" WHERE key NOT IN ({keys}) AND requires_note <> 0")
     backfill_search(conn)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
+                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (SCHEMA_VERSION,))
     conn.commit()
     if own:
         conn.close()
