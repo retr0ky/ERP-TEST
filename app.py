@@ -484,10 +484,14 @@ def init_db(conn=None):
 
 
 def payment_rows(active_only=False):
+    cache = g.setdefault("payment_rows", {})      # one round trip per request, not five
+    if active_only in cache:
+        return cache[active_only]
     sql = "SELECT * FROM payment_methods"
     if active_only:
         sql += " WHERE active = 1"
-    return db().execute(sql + " ORDER BY sort, id").fetchall()
+    cache[active_only] = db().execute(sql + " ORDER BY sort, id").fetchall()
+    return cache[active_only]
 
 
 def payment_map():
@@ -1091,9 +1095,15 @@ def cart_requirements(product_entries=None, cart_sets=None):
     errors = []
     remaining = {}
     short = []
+    if need:
+        marks = ",".join("?" for _ in need)
+        found = {r["id"]: r for r in conn.execute(
+            f"SELECT id, name, qty FROM products WHERE active = 1 AND id IN ({marks})",
+            tuple(need)).fetchall()}
+    else:
+        found = {}
     for pid, req in need.items():
-        p = conn.execute("SELECT id, name, qty FROM products WHERE id = ? AND active = 1",
-                         (pid,)).fetchone()
+        p = found.get(pid)
         if p is None:
             errors.append(f"Cart item references product id {pid}, which is unavailable.")
             continue
@@ -1123,10 +1133,26 @@ def set_catalog(q="", cat_id=None):
     sets = [dict(r) for r in conn.execute(
         """SELECT s.* FROM sets s WHERE s.active = 1 ORDER BY s.name""").fetchall()]
     wanted = query_words(q)
+    need, _, _, _ = cart_requirements()      # once, not once per set
+    # Two queries for every set instead of two queries per set.
+    comps_by_set, missing_by_set = {}, {}
+    for r in conn.execute("""SELECT sp.set_id, p.id, p.name, p.price, p.qty AS stock,
+                                   sp.qty AS per_set, p.category_id AS category_id
+                            FROM set_products sp
+                            JOIN products p ON p.id = sp.product_id AND p.active = 1
+                            ORDER BY p.name""").fetchall():
+        comps_by_set.setdefault(r["set_id"], []).append(dict(r))
+    for r in conn.execute("""SELECT sp.set_id, sp.product_id, p.name, p.active
+                            FROM set_products sp
+                            LEFT JOIN products p ON p.id = sp.product_id""").fetchall():
+        if r["name"] is None:
+            missing_by_set.setdefault(r["set_id"], []).append(f"product id {r['product_id']} (purged)")
+        elif not r["active"]:
+            missing_by_set.setdefault(r["set_id"], []).append(f"{r['name']} (deleted)")
     out = []
     for s in sets:
-        comps = set_components(conn, s["id"])
-        missing = missing_set_components(conn, s["id"])
+        comps = comps_by_set.get(s["id"], [])
+        missing = missing_by_set.get(s["id"], [])
         if cat_id is not None and not any(c.get("category_id") == cat_id for c in comps):
             continue
         price, base = set_price_of(s, comps)
@@ -1137,7 +1163,6 @@ def set_catalog(q="", cat_id=None):
                                 + [s.get("sku") or "", s.get("brand") or ""]))
             if not all(norm(w) in hay for w in wanted):
                 continue
-        need, _, _, _ = cart_requirements()
         max_add = 9999
         for c in comps:
             max_add = min(max_add, (c["stock"] - need.get(c["id"], 0)) // max(c["per_set"], 1))
