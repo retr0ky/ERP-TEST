@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Log in{% endblock %}
+{% block content %}
+<h1>ERP log in</h1>
+<form method="post" class="payform">
+  <input name="password" type="password" autocomplete="current-password" autofocus placeholder="Password">
+  <input type="hidden" name="nxt" value="{{ nxt }}">
+  <button class="btn">Log in</button>
+</form>
+{% endblock %}

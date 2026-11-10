@@ -24,8 +24,48 @@ def money(value):
     return f"{value:,.2f}{CURRENCY}"
 
 
+import hmac
+import secrets
+
+PUBLIC = os.environ.get("ERP_PUBLIC") == "1"
+DEBUG_MODE = os.environ.get("ERP_DEBUG", "1" if not PUBLIC else "0") == "1"
+PASSWORD = os.environ.get("ERP_PASSWORD") or ""
+
 app = Flask(__name__)
-app.secret_key = "single-user-dev-secret-change-me"
+if PUBLIC and not os.environ.get("ERP_SECRET_KEY"):
+    raise RuntimeError("ERP_PUBLIC=1 needs ERP_SECRET_KEY (stable sessions) and ERP_PASSWORD (login).")
+app.secret_key = os.environ.get("ERP_SECRET_KEY") or secrets.token_hex(32)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=PUBLIC)
+
+
+@app.before_request
+def login_gate():
+    """Optional single-user gate - only active when ERP_PASSWORD is set."""
+    if not PASSWORD or session.get("authed"):
+        return None
+    if request.endpoint in ("login", "logout", "static"):
+        return None
+    return redirect(url_for("login", nxt=request.path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    nxt = request.args.get("nxt") or url_for("pos")
+    if request.method == "POST":
+        if PASSWORD and hmac.compare_digest(request.form.get("password", ""), PASSWORD):
+            session["authed"] = True
+            session["cart"] = session.get("cart", {})
+            return redirect(nxt)
+        flash("Wrong password.", "error")
+    return render_template("login.html", nxt=nxt)
+
+
+@app.route("/logout")
+def logout():
+    session.pop("authed", None)
+    return redirect(url_for("login"))
+
 app.jinja_env.globals["CURRENCY"] = CURRENCY
 app.jinja_env.globals["VAT_PERCENT"] = VAT_PERCENT
 app.jinja_env.filters["money"] = money
@@ -1591,4 +1631,5 @@ def erp_globals():
 init_db()
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host=os.environ.get("ERP_HOST", "127.0.0.1"),
+            port=int(os.environ.get("ERP_PORT", "5000")), debug=DEBUG_MODE)
