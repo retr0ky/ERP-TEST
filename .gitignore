@@ -6,3 +6,4 @@ erp.db
 *.db
 .env
 .env.*
+!.env.example
