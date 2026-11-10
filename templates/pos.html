@@ -1,0 +1,735 @@
+{% extends "base.html" %}
+{% block title %}POS{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <h1>Point of sale</h1>
+  <a class="btn ghost no-print" href="{{ url_for('inventory') }}">Inventory</a>
+  <a class="btn ghost no-print" href="{{ url_for('sales') }}">Sales</a>
+</div>
+
+<div class="pos">
+  <div class="pos-left">
+    <h2>Catalogue</h2>
+    <div class="chips no-print">
+      <a class="chip {{ 'on' if browse and not cat }}" href="{{ url_for('pos', browse=1, q=q or None) }}">All</a>
+      {% for c in categories %}
+        <a class="chip {{ 'on' if cat == c['id'] }}"
+           href="{{ url_for('pos', browse=1, q=q or None, cat=c['id']) }}">{{ c['name'] }} ({{ c['stock'] }})</a>
+      {% endfor %}
+    </div>
+    <div class="browse-open">
+      <label for="browse-modal" class="btn">Browse products</label>
+      <span class="muted small">or tap a category</span>
+    </div>
+
+    {% if sets %}
+    <div class="setbar no-print" id="setbar">
+      <h3 class="setbar-h">Sets ({{ sets | length }})</h3>
+      <div class="setbar-grid" id="setbar-grid">
+        {% for s in sets %}
+          <form method="post" action="{{ url_for('pos_add_set_items', sid=s['id'], q=q or None, cat=cat or None) }}">
+            <button class="prod set {{ 'oos' if s.short }}" type="submit"
+                    title="{{ s['components'] | map(attribute='name') | join(' + ') }}">
+              <span class="pname">{{ s['name'] }}</span>
+              <span class="pprice">{{ s['unit_price'] | money }}</span>
+              {% if s.short %}
+                <span class="pstock oos">short: {{ s.short | join(', ') }}</span>
+              {% else %}
+                <span class="pstock">{{ s.available }} ready - {{ s.component_count }} parts</span>
+              {% endif %}
+            </button>
+          </form>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <input type="checkbox" id="browse-modal" class="modal-toggle" {% if browse %}checked{% endif %}>
+    <div class="modal-backdrop browse-backdrop">
+      <div class="modal browse">
+        <div class="modal-head">
+          <h2>{{ browse_title }}</h2>
+          <label for="browse-modal" class="modal-x" title="Close">✕</label>
+        </div>
+        <div class="browsebar">
+          <input id="browse-q" type="search" value="{{ q }}" autocomplete="off" spellcheck="false"
+                 placeholder="Search name, SKU, barcode, brand">
+          <label for="browse-modal" class="btn ghost">Close</label>
+        </div>
+
+        <h3 class="browse-h">Products</h3>
+        <div class="browse-grid" id="browse-grid">
+          {% for p in browse_products if browse %}
+            <form method="post" action="{{ url_for('pos_add', pid=p['id'], q=q or None, cat=cat or None, browse=1) }}">
+              <button class="prod {{ 'oos' if p['qty'] <= 0 }}" type="submit">
+                <span class="pname">{{ p['name'] }}</span>
+                <span class="pprice">{{ p['price'] | money }}</span>
+                <span class="pstock {{ 'oos' if p['qty'] <= 0 }}">{{ p['qty'] }} left{% if p['category'] %} - {{ p['category'] }}{% endif %}</span>
+              </button>
+            </form>
+          {% endfor %}
+        </div>
+
+        <div class="browse-sets" id="browse-sets"{% if not browse_sets or not browse %} hidden{% endif %}>
+          <h3>Sets</h3>
+          <div class="browse-grid sets" id="browse-setgrid">
+            {% for s in browse_sets if browse %}
+              <form method="post" action="{{ url_for('pos_add_set_items', sid=s['id'], q=q or None, cat=cat or None, browse=1) }}">
+                <button class="prod set {{ 'oos' if s.short }}" type="submit">
+                  <span class="pname">{{ s['name'] }}</span>
+                  <span class="pprice">{{ s['unit_price'] | money }}</span>
+                  {% if s.short %}
+                    <span class="pstock oos">short: {{ s.short | join(', ') }}</span>
+                  {% else %}
+                    <span class="pstock">{{ s.available }} ready - {{ s.component_count }} parts</span>
+                  {% endif %}
+                </button>
+              </form>
+            {% endfor %}
+          </div>
+        </div>
+
+        <p class="muted small" id="browse-empty"{% if browse and browse_products %} hidden{% endif %}>No product matches this search / category.</p>
+        <div class="browse-foot">
+          <span class="muted small" id="browse-count">{{ browse_products | length }} product{{ '' if browse_products | length == 1 else 's' }}{% if browse_sets %} · {{ browse_sets | length }} set{{ '' if browse_sets | length == 1 else 's' }}{% endif %}</span>
+          <label for="browse-modal" class="btn ghost">Done</label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <form method="get" class="searchrow no-print" id="search-form">
+      {% if cat %}<input type="hidden" name="cat" value="{{ cat }}">{% endif %}
+      <div class="live">
+        <input id="live-q" name="q" value="{{ q }}" autocomplete="off" autofocus
+               placeholder="Search name or SKU - try “RTX”">
+        <div class="suggest" id="suggest" hidden></div>
+      </div>
+      {% if q or cat %}<a class="btn ghost" href="{{ url_for('pos') }}">Clear</a>{% endif %}
+    </form>
+
+    <h2>Cart</h2>
+    {% if cart or cart_sets %}
+      <table class="cart">
+        <colgroup><col class="c-item"><col class="c-qty"><col class="c-total"><col class="c-x"></colgroup>
+        <tr><th>Item</th><th class="num">Qty</th><th class="num">Total</th><th></th></tr>
+        {% for p, qty in cart %}
+          {% set sh = short.get(p['id']) %}
+          <tr class="{{ 'oos' if sh }}">
+            <td class="c-item">
+              <span class="cname">{{ p['name'] }}</span>
+              <span class="cmeta">{{ p['price'] | money }} each</span>
+              {% if sh %}<span class="oosbadge">out of stock - need {{ sh['need'] }}, have {{ sh['stock'] }}</span>{% endif %}
+            </td>
+            <td class="num cartqty"><span class="qtybox">
+              <form method="post" action="{{ url_for('pos_dec', pid=p['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny ghost" title="one fewer">−</button></form>
+              <span class="qn">{{ qty }}</span>
+              <form method="post" action="{{ url_for('pos_add', pid=p['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny ghost" title="one more">+</button></form>
+            </span></td>
+            <td class="num c-total">{{ (p['price'] * qty) | money }}</td>
+            <td class="num c-x"><form method="post" action="{{ url_for('pos_remove', pid=p['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny danger" title="remove">✕</button></form></td>
+          </tr>
+        {% endfor %}
+        {% for s, qty in cart_sets %}
+          {% set sshort = [] %}
+          {% for c in s['components'] %}
+            {% if short.get(c['id']) %}{% if sshort.append(short[c['id']]) %}{% endif %}{% endif %}
+          {% endfor %}
+          <tr class="{{ 'oos' if sshort }}">
+            <td class="c-item">
+              <span class="cname">{{ s['name'] }}</span>
+              <span class="cmeta">{{ s['unit_price'] | money }} set{% if s['price'] is none %} (component total){% endif %}</span>
+              {% for sh in sshort %}
+                <span class="oosbadge">{{ sh['name'] }} out of stock - need {{ sh['need'] }}, have {{ sh['stock'] }}</span>
+              {% endfor %}
+            </td>
+            <td class="num cartqty"><span class="qtybox">
+              <form method="post" action="{{ url_for('pos_dec_set', sid=s['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny ghost" title="one fewer">−</button></form>
+              <span class="qn">{{ qty }}</span>
+              <form method="post" action="{{ url_for('pos_add_set_items', sid=s['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny ghost" title="one more">+</button></form>
+            </span></td>
+            <td class="num c-total">{{ (s['unit_price'] * qty) | money }}</td>
+            <td class="num c-x"><form method="post" action="{{ url_for('pos_remove_set', sid=s['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny danger" title="remove">✕</button></form></td>
+          </tr>
+        {% endfor %}
+      </table>
+
+      <div class="totalrow"><span>Cart total</span><span class="grand">{{ goods_total | money }}</span></div>
+      {% if pays %}
+        <div class="payrow"><span>Paid</span><span>{{ paid | money }}</span></div>
+        {% if balance > 0 %}
+          <div class="payrow due"><span>Balance due</span><span>{{ balance | money }}</span></div>
+        {% elif change > 0 %}
+          <div class="payrow okrow"><span>Change back</span><span>{{ change | money }}</span></div>
+        {% endif %}
+      {% endif %}
+
+      {% if short or cart_errors %}
+        <div class="shortrow">
+          {% for err in cart_errors %}<div class="serr">{{ err }}</div>{% endfor %}
+          {% for sh in short.values() %}
+            <div><span class="oosbadge">out of stock</span> {{ sh['name'] }} - cart needs {{ sh['need'] }}, only {{ sh['stock'] }} left. Swap or remove it to sell.</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <input type="checkbox" id="pay-modal" class="modal-toggle" {% if open_pay %}checked{% endif %}>
+      <div class="paybar no-print">
+        {% if short or cart_errors %}
+          <span class="btn big off" title="Out of stock items in the cart">Out of stock - cannot sell</span>
+        {% else %}
+          <label for="pay-modal" class="btn big">Proceed with payment</label>
+        {% endif %}
+        <form method="post" action="{{ url_for('pos_clear', q=q or None, cat=cat or None) }}" class="inline">
+          <button class="btn ghost">Clear cart</button>
+        </form>
+      </div>
+
+      <div class="modal-backdrop">
+        <div class="modal">
+          <div class="modal-head">
+            <h2>Payment</h2>
+            <label for="pay-modal" class="modal-x" title="Close">✕</label>
+          </div>
+
+          <table class="pays" id="pay-lines"{% if not pays %} hidden{% endif %}>
+              <tr><th>Method</th><th class="num">Amount</th><th></th></tr>
+              {% for pay in pays %}
+                <tr>
+                  <td>{{ PAY_METHODS.get(pay['method'], pay['method']) }}
+                    {% if pay.get('note') %}<div class="paynote">{{ pay['note'] }}</div>{% endif %}
+                    {% if pay['method'] in NOTE_KEYS and not pay.get('note') %}<div class="paynote miss">note missing</div>{% endif %}</td>
+                  <td class="num">{{ pay['amount'] | money }}</td>
+                  <td class="num">
+                    <form method="post" action="{{ url_for('pos_pay_remove', idx=loop.index0, open=1, q=q or None, cat=cat or None) }}" class="inline">
+                      <button class="btn tiny danger" data-api="{{ url_for('pos_api_pay_remove', idx=loop.index0) }}" title="remove line">✕</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </table>
+          <p class="muted small" id="pay-empty"{% if pays %} hidden{% endif %}>Split the total across payment methods.</p>
+
+          <form method="post" action="{{ url_for('pos_pay', open=1, q=q or None, cat=cat or None) }}" class="payform" id="pay-form">
+            <select name="method" id="pay-method">
+              {% for pm in pay_methods %}
+                <option value="{{ pm['key'] }}"{% if pm['requires_note'] %} data-note="1"{% endif %}>{{ pm['label'] }}</option>
+              {% endfor %}
+            </select>
+            <input name="amount" id="pay-amount" class="amount" type="text" inputmode="numeric"
+                   autocomplete="off" spellcheck="false" placeholder="Enter amount">
+            <input name="note" id="pay-note" class="paynote-input" type="text" autocomplete="off"
+                   maxlength="300" placeholder="Leasing app / provider (required)" hidden>
+            <button class="btn" data-api="{{ url_for('pos_api_pay') }}">Add payment</button>
+            <button class="btn ghost" formaction="{{ url_for('pos_pay_exact', open=1, q=q or None, cat=cat or None) }}"
+                   data-api="{{ url_for('pos_api_pay_exact') }}">Pay remaining</button>
+          </form>
+
+          <p class="flash error" id="pay-error" hidden></p>
+          <div class="payrow"><span>Goods</span><span id="t-goods">{{ goods_total | money }}</span></div>
+          <form method="post" action="{{ url_for('pos_vat') }}" class="vatform{% if vat %} on{% endif %}" id="vat-form">
+            <label class="payrow vatrow">
+              <span class="vatbox"><input type="checkbox" name="vat" value="1" {% if vat %}checked{% endif %}> VAT {{ VAT_PERCENT | round | int }}%</span>
+              <span id="t-vat">{% if vat %}{{ vat | money }}{% endif %}</span>
+            </label>
+          </form>
+          <div class="payrow"><span>Total</span><span class="grand" id="t-total">{{ total | money }}</span></div>
+          <div class="payrow"{% if paid <= 0 %} hidden{% endif %}><span>Paid</span><span id="t-paid">{{ paid | money }}</span></div>
+          <div class="payrow due"{% if balance <= 0 %} hidden{% endif %}><span>Balance due</span><span id="t-balance">{{ balance | money }}</span></div>
+          <div class="payrow okrow"{% if change <= 0 %} hidden{% endif %}><span>Change back</span><span id="t-change">{{ change | money }}</span></div>
+
+          <div class="modal-foot">
+            <form method="post" action="{{ url_for('pos_checkout') }}" class="custform" id="cust-form">
+              <div class="custrow">
+                <input name="customer_phone" id="cust-phone" class="custphone" type="tel" inputmode="tel"
+                       autocomplete="off" spellcheck="false" maxlength="20" placeholder="Customer phone"
+                       value="{{ customer.phone or '' }}">
+                <input name="customer_note" id="cust-note" type="text" autocomplete="off"
+                       maxlength="300" placeholder="Note (optional)" value="{{ customer.note or '' }}">
+              </div>
+              <button class="btn big" {% if balance > 0 or not pays %}disabled{% endif %}>Complete sale</button>
+            </form>
+            <label for="pay-modal" class="btn ghost">Back to cart</label>
+          </div>
+        </div>
+      </div>
+
+      <h2>Held carts</h2>
+      <form method="post" action="{{ url_for('pos_hold', q=q or None, cat=cat or None) }}" class="payform">
+        <input name="label" placeholder="Label (customer, till...)" autocomplete="off">
+        <button class="btn ghost">Hold cart</button>
+      </form>
+      {% if held %}
+        <table class="pays">
+          <tr><th>Label</th><th>When</th><th></th></tr>
+          {% for h in held %}
+            <tr>
+              <td>{{ h['label'] }}</td>
+              <td class="small muted">{{ h['created_at'] }}</td>
+              <td class="num">
+                <form method="post" action="{{ url_for('pos_hold_resume', hid=h['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny ghost">Resume</button></form>
+                <form method="post" action="{{ url_for('pos_hold_delete', hid=h['id'], q=q or None, cat=cat or None) }}" class="inline"><button class="btn tiny danger">Delete</button></form>
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% else %}
+        <p class="muted small">No held carts.</p>
+      {% endif %}
+    {% else %}
+      <p class="muted">Cart is empty - tap a product or scan a barcode.</p>
+      {% if held %}
+        <h2>Held carts</h2>
+        <table class="pays">
+          <tr><th>Label</th><th>When</th><th></th></tr>
+          {% for h in held %}
+            <tr>
+              <td>{{ h['label'] }}</td>
+              <td class="small muted">{{ h['created_at'] }}</td>
+              <td class="num">
+                <form method="post" action="{{ url_for('pos_hold_resume', hid=h['id']) }}" class="inline"><button class="btn tiny ghost">Resume</button></form>
+                <form method="post" action="{{ url_for('pos_hold_delete', hid=h['id']) }}" class="inline"><button class="btn tiny danger">Delete</button></form>
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const input = document.getElementById('live-q');
+  const box = document.getElementById('suggest');
+  const cat = {{ cat | tojson }};
+  const addUrl = {{ url_for('pos_add', pid=0) | tojson }};
+  let timer = null, items = [], sel = -1, seq = 0;
+
+  function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+  function paint() {
+    box.innerHTML = '';
+    if (!items.length) { box.hidden = true; return; }
+    box.hidden = false;
+    items.forEach(function (p, i) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'sug' + (i === sel ? ' on' : '') + (p.qty <= 0 ? ' out' : '');
+      row.innerHTML = '<span class="srow"><span class="sname">' + esc(p.name) + '</span>' +
+        '<span class="sprice">' + esc(p.price) + '</span></span>' +
+        '<span class="smeta">' + [p.category ? esc(p.category) : '',
+            p.qty <= 0 ? 'out of stock' : p.qty + ' left']
+            .filter(Boolean).join(' &middot; ') + '</span>';
+      row.onclick = function () { pick(p); };
+      box.appendChild(row);
+    });
+  }
+
+  async function lookup() {
+    const q = input.value.trim();
+    const mine = ++seq;
+    if (!q) { items = []; sel = -1; paint(); return; }
+    try {
+      const r = await fetch('/pos/search?q=' + encodeURIComponent(q) + (cat ? '&cat=' + cat : ''),
+                            { headers: { 'X-Requested-With': 'xhr' } });
+      const data = await r.json();
+      // drop out-of-order responses: a slow lookup for an older term must not win
+      if (mine !== seq || input.value.trim() !== q) return;
+      items = data;
+      sel = items.length ? 0 : -1;
+      paint();
+    } catch (err) { items = []; sel = -1; paint(); }
+  }
+
+  function pick(p) {
+    items = []; sel = -1; paint();
+    const f = document.createElement('form');
+    f.method = 'post';
+    f.action = addUrl.replace(/\/0$/, '/' + p.id) + '?q=' + encodeURIComponent(input.value.trim())
+      + (cat ? '&cat=' + cat : '') + '{{ '&browse=1' if browse else '' }}';
+    document.body.appendChild(f);
+    f.submit();
+  }
+
+  input.addEventListener('input', function () {
+    clearTimeout(timer);
+    timer = setTimeout(lookup, 110);
+  });
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { items = []; sel = -1; paint(); return; }
+    if (!items.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = (sel + 1) % items.length; paint(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = (sel - 1 + items.length) % items.length; paint(); }
+    else if (e.key === 'Enter') { e.preventDefault(); pick(items[sel >= 0 ? sel : 0]); }
+  });
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.live')) { items = []; sel = -1; paint(); }
+  });
+})();
+
+(function () {
+  const input = document.getElementById('browse-q');
+  if (!input) return;
+  const grid = document.getElementById('browse-grid');
+  const setBox = document.getElementById('browse-sets');
+  const setGrid = document.getElementById('browse-setgrid');
+  const empty = document.getElementById('browse-empty');
+  const count = document.getElementById('browse-count');
+  const cat = {{ cat | tojson }};
+  const sets = {{ browse_sets | tojson }};
+  const CUR = {{ CURRENCY | tojson }};
+  const searchUrl = {{ url_for('pos_search') | tojson }};
+  const addUrl = {{ url_for('pos_add', pid=0) | tojson }};
+  const addSetUrl = {{ url_for('pos_add_set_items', sid=0) | tojson }};
+  let timer = null, seq = 0;
+
+  function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  function fmt(n) {
+    const s = Number(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return s + CUR;
+  }
+  function query(extra) {
+    const a = ['browse=1'].concat(extra || []);
+    const term = input.value.trim();
+    if (term) a.push('q=' + encodeURIComponent(term));
+    if (cat) a.push('cat=' + cat);
+    return a.join('&');
+  }
+  function card(url, cls, name, price, meta, out) {
+    const f = document.createElement('form');
+    f.method = 'post';
+    f.action = url + '?' + query();
+    const b = document.createElement('button');
+    b.type = 'submit';
+    b.className = 'prod' + cls + (out ? ' oos' : '');
+    b.innerHTML = '<span class="pname">' + esc(name) + '</span>'
+      + '<span class="pprice">' + esc(fmt(price)) + '</span>'
+      + '<span class="pstock' + (out ? ' oos' : '') + '">' + esc(meta) + '</span>';
+    f.appendChild(b);
+    return f;
+  }
+  function paintProducts(items) {
+    grid.innerHTML = '';
+    items.forEach(function (p) {
+      const out = p.qty <= 0;
+      grid.appendChild(card(addUrl.replace(/\/0$/, '/' + p.id), '', p.name, p.amount,
+        out ? 'out of stock' : p.qty + ' left' + (p.category ? ' - ' + p.category : ''), out));
+    });
+  }
+  function paintSets(term) {
+    const words = term.toLowerCase().split(/\s+/).filter(Boolean);
+    const hits = sets.filter(function (s) {
+      if (!words.length) return true;
+      const hay = [s.name, s.description || ''].concat((s.components || []).map(c => c.name))
+        .join(' ').toLowerCase();
+      return words.every(w => hay.indexOf(w) >= 0);
+    });
+    setGrid.innerHTML = '';
+    hits.forEach(function (s) {
+      const short = s.short && s.short.length;
+      setGrid.appendChild(card(
+        addSetUrl.replace(/\/0$/, '/' + s.id), ' set', s.name, s.unit_price,
+        short ? 'short: ' + s.short.join(', ') : s.available + ' ready - ' + s.component_count + ' parts',
+        !!short));
+    });
+    setBox.hidden = !hits.length;
+    return hits.length;
+  }
+  function report(pcount, scount) {
+    const parts = [pcount + ' product' + (pcount === 1 ? '' : 's')];
+    if (scount) parts.push(scount + ' set' + (scount === 1 ? '' : 's'));
+    count.textContent = parts.join(' · ');
+    empty.hidden = pcount > 0 || scount > 0;
+  }
+  async function lookup() {
+    const term = input.value.trim();
+    const mine = ++seq;
+    try {
+      const r = await fetch(searchUrl + '?limit=200&browse=1' + (cat ? '&cat=' + cat : '')
+                            + (term ? '&q=' + encodeURIComponent(term) : ''),
+                            { headers: { 'X-Requested-With': 'xhr' } });
+      const items = await r.json();
+      if (mine !== seq || input.value.trim() !== term) return;
+      paintProducts(items);
+      report(items.length, paintSets(term));
+    } catch (err) {
+      if (mine !== seq) return;
+      grid.innerHTML = '';
+      setGrid.innerHTML = '';
+      report(0, 0);
+      empty.textContent = 'Search failed - try again.';
+      empty.hidden = false;
+    }
+  }
+  input.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(lookup, 130); });
+  const opener = document.getElementById('browse-modal');
+  if (opener) {
+    if (opener.checked && !grid.children.length) lookup();
+    opener.addEventListener('change', function () {
+      if (opener.checked && !grid.children.length) lookup();
+    });
+  }
+  input.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    const first = grid.querySelector('button') || setGrid.querySelector('button');
+    if (first) { e.preventDefault(); first.click(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      const t = document.getElementById('browse-modal');
+      if (t && t.checked) { t.checked = false; t.dispatchEvent(new Event('change')); }
+    }
+  });
+})();
+
+{% if browse %}
+(function () {
+  document.querySelectorAll('form[method="post"]').forEach(function (f) {
+    if (f.querySelector('input[name="browse"]')) return;
+    const i = document.createElement('input');
+    i.type = 'hidden'; i.name = 'browse'; i.value = '1';
+    f.appendChild(i);
+  });
+})();
+{% endif %}
+
+(function () {
+  const amount = document.getElementById('pay-amount');
+  const methodSel = document.querySelector('.payform select[name="method"]');
+  const noteInput = document.getElementById('pay-note');
+  if (!amount || !methodSel) return;
+
+  const CUR = {{ CURRENCY | tojson }};
+  const GOODS = {{ goods_total | tojson }};
+  const NOTE_KEYS = {{ NOTE_KEYS | tojson }};
+  let PAYS = [
+    {% for p in pays %}{ method: {{ p['method'] | tojson }}, amount: {{ p['amount'] }}, note: {{ (p.get('note') or '') | tojson }} }{{ ',' if not loop.last }}{% endfor %}
+  ];
+
+  const r2 = (n) => Math.round((n + 0) * 100) / 100;
+  const group = (s) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const fmt = (n) => {
+    n = r2(n);
+    const neg = n < 0 ? '-' : '';
+    const a = Math.abs(n).toFixed(2).replace(/\.00$/, '');
+    const parts = a.split('.');
+    return neg + group(parts[0]) + (parts[1] ? '.' + parts[1] : '') + CUR;
+  };
+  const VATP = {{ VAT_PERCENT | tojson }};
+  let VAT = {{ (vat > 0) | tojson }};
+  const totals = (pays) => {
+    let paid = 0;
+    pays.forEach((p) => { paid += p.amount; });
+    paid = r2(paid);
+    const vat = VAT ? r2(GOODS * VATP / 100) : 0;
+    const total = r2(GOODS + vat);
+    return { vat, total, paid, balance: r2(total - paid), change: r2(paid - total) };
+  };
+  const paintVat = (vat) => {
+    const v = document.getElementById('t-vat');
+    const f = document.getElementById('vat-form');
+    const box = f ? f.querySelector('input[name="vat"]') : null;
+    if (v) v.textContent = vat ? fmt(vat) : '';
+    if (f) f.classList.toggle('on', VAT);
+    if (box) box.checked = VAT;
+  };
+  const numOf = (s) => {
+    const cleaned = String(s).replace(/[^0-9.]/g, '');
+    if (!cleaned || cleaned === '.') return null;
+    const n = parseFloat(cleaned);
+    return isFinite(n) && n > 0 ? r2(n) : null;
+  };
+  const show = (id, text, hide) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const row = el.closest('.payrow');
+    if (row) row.hidden = !!hide;
+    if (text !== null) el.textContent = text;
+  };
+
+  function draw() {
+    const base = totals(PAYS);
+    const typed = numOf(amount.value);
+    const live = typed === null ? base : {
+      total: base.total,
+      paid: r2(base.paid + typed),
+      balance: r2(base.total - base.paid - typed),
+      change: r2(base.paid + typed - base.total),
+    };
+    document.getElementById('t-goods').textContent = fmt(GOODS);
+    paintVat(base.vat);
+    document.getElementById('t-total').textContent = fmt(base.total);
+    show('t-paid', fmt(live.paid), live.paid <= 0.004);
+    show('t-balance', fmt(live.balance), live.balance <= 0.004);
+    show('t-change', fmt(live.change), live.change <= 0.004);
+    ['t-paid', 't-balance', 't-change'].forEach((id) => {
+      const el = document.getElementById(id);
+      const row = el ? el.closest('.payrow') : null;
+      if (row) row.classList.toggle('live', typed !== null);
+    });
+    const btn = document.querySelector('.modal-foot button.btn.big');
+    if (btn) btn.disabled = live.balance > 0.004 || !PAYS.length || missingNote();
+  }
+
+  function retype() {
+    const raw = amount.value;
+    const caret = amount.selectionStart;
+    const digitsBefore = raw.slice(0, caret).replace(/[^0-9]/g, '').length;
+    let cleaned = raw.replace(/[^0-9.]/g, '');
+    const dot = cleaned.indexOf('.');
+    if (dot !== -1) cleaned = cleaned.slice(0, dot + 1) + cleaned.slice(dot + 1).replace(/\./g, '');
+    cleaned = cleaned.replace(/^0+(?=\d)/, '');
+    let ip = cleaned.split('.')[0], dp = cleaned.includes('.') ? cleaned.split('.')[1] : null;
+    let out = ip ? group(ip) : '';
+    if (dp !== null) out += '.' + dp;
+    amount.value = out;
+    let seen = 0, pos = out.length;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] >= '0' && out[i] <= '9') { seen++; if (seen === digitsBefore) { pos = i + 1; break; } }
+    }
+    if (digitsBefore === 0) pos = 0;
+    amount.setSelectionRange(pos, pos);
+    draw();
+  }
+
+  const noteNeeded = () => {
+    const o = methodSel.selectedOptions && methodSel.selectedOptions[0];
+    return !!(o && o.dataset.note);
+  };
+  const syncNote = () => {
+    if (!noteInput) return;
+    const need = noteNeeded();
+    noteInput.hidden = !need;
+    noteInput.required = need;
+    if (!need) noteInput.value = '';
+  };
+  const missingNote = () => PAYS.some((p) => NOTE_KEYS.indexOf(p.method) >= 0 && !String(p.note || '').trim());
+
+  amount.addEventListener('input', retype);
+  methodSel.addEventListener('change', () => { syncNote(); draw(); });
+  if (noteInput) noteInput.addEventListener('input', draw);
+  amount.addEventListener('blur', () => { if (amount.value.trim()) retype(); else draw(); });
+
+  const vatForm = document.getElementById('vat-form');
+  const vatBox = vatForm ? vatForm.querySelector('input[name="vat"]') : null;
+  if (vatBox) vatBox.addEventListener('change', async () => {
+    VAT = vatBox.checked;
+    draw();
+    try {
+      const r = await fetch(vatForm.action, { method: 'POST', body: new FormData(vatForm), headers: { 'X-Requested-With': 'xhr' } });
+      const d = await r.json();
+      if (!d.ok) { fail(d.error || 'Something went wrong.'); return; }
+      PAYS = d.lines.map((l) => ({ method: l.method, amount: l.amount, note: l.note || '' }));
+      paintLines(d.lines);
+      paintTotals(d);
+    } catch (err) { fail('Could not reach the server.'); }
+  });
+
+  const custForm = document.getElementById('cust-form');
+  const custPhone = document.getElementById('cust-phone');
+  const custNote = document.getElementById('cust-note');
+  if (custForm && custPhone && custNote) {
+    let custTimer = null;
+    const pushCustomer = () => {
+      clearTimeout(custTimer);
+      custTimer = setTimeout(() => {
+        const body = new URLSearchParams({
+          customer_phone: custPhone.value, customer_note: custNote.value
+        });
+        fetch("{{ url_for('pos_customer') }}?open=1", {
+          method: 'POST', body, headers: { 'X-Requested-With': 'xhr' }
+        }).catch(() => {});
+      }, 500);
+    };
+    custPhone.addEventListener('input', pushCustomer);
+    custNote.addEventListener('input', pushCustomer);
+    custPhone.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
+  }
+
+  const form = document.getElementById('pay-form');
+  const linesEl = document.getElementById('pay-lines');
+  const emptyEl = document.getElementById('pay-empty');
+  const errEl = document.getElementById('pay-error');
+  const completeBtn = document.querySelector('.modal-foot button.btn.big');
+  const HEAD = '<tr><th>Method</th><th class="num">Amount</th><th></th></tr>';
+  const txt = (s) => { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; };
+
+  function paintLines(lines) {
+    if (!linesEl) return;
+    if (!lines.length) {
+      linesEl.innerHTML = ''; linesEl.hidden = true;
+      if (emptyEl) emptyEl.hidden = false;
+      return;
+    }
+    linesEl.hidden = false;
+    if (emptyEl) emptyEl.hidden = true;
+    linesEl.innerHTML = HEAD + lines.map((l) =>
+      '<tr><td>' + txt(l.label) +
+      (l.note ? '<div class="paynote">' + txt(l.note) + '</div>' : '') +
+      (l.needs_note ? '<div class="paynote miss">note missing</div>' : '') +
+      '</td><td class="num">' + fmt(l.amount) + '</td>' +
+      '<td class="num"><form method="post" class="inline">' +
+      '<button class="btn tiny danger" data-api="' + l.api +
+      '" title="remove line">✕</button></form></td></tr>').join('');
+  }
+
+  function paintTotals(d) {
+    const g = document.getElementById('t-goods');
+    const t = document.getElementById('t-total');
+    const p = document.getElementById('t-paid');
+    if (g) g.textContent = fmt(d.goods);
+    paintVat(d.vat);
+    if (t) t.textContent = fmt(d.total);
+    show('t-paid', fmt(d.paid), d.paid <= 0.004);
+    show('t-balance', fmt(d.balance), d.balance <= 0.004);
+    show('t-change', fmt(d.change), d.change <= 0.004);
+    if (completeBtn) completeBtn.disabled = !d.can_complete;
+  }
+
+  function fail(msg) {
+    if (errEl) { errEl.textContent = msg; errEl.hidden = false; }
+  }
+
+  async function send(url, body) {
+    let d;
+    try {
+      const r = await fetch(url, { method: 'POST', body: body, headers: { 'X-Requested-With': 'xhr' } });
+      d = await r.json();
+    } catch (err) { fail('Could not reach the server.'); return null; }
+    if (!d.ok) { fail(d.error || 'Something went wrong.'); return null; }
+    if (errEl) { errEl.textContent = ''; errEl.hidden = true; }
+    PAYS = d.lines.map((l) => ({ method: l.method, amount: l.amount, note: l.note || '' }));
+    paintLines(d.lines);
+    paintTotals(d);
+    amount.value = '';
+    if (noteInput && noteNeeded()) { noteInput.value = ''; noteInput.focus(); }
+    else amount.focus();
+    draw();
+    return d;
+  }
+
+  if (form) form.addEventListener('submit', (e) => {
+    const api = e.submitter && e.submitter.dataset ? e.submitter.dataset.api : null;
+    if (!api) return;
+    e.preventDefault();
+    form.classList.add('busy');
+    send(api, new FormData(form)).then(() => form.classList.remove('busy'));
+  });
+
+  if (linesEl) linesEl.addEventListener('submit', (e) => {
+    const api = e.submitter && e.submitter.dataset ? e.submitter.dataset.api : null;
+    if (!api) return;
+    e.preventDefault();
+    send(api, new FormData());
+  });
+  syncNote();
+  draw();
+})();
+</script>
+{% endblock %}

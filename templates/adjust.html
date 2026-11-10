@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Adjust stock{% endblock %}
+{% block content %}
+<h1>Adjust stock</h1>
+<p class="muted">{{ p['name'] }} - current stock <b class="text">{{ p['qty'] }}</b></p>
+<form method="post" class="form">
+  <label class="radio"><input type="radio" name="direction" value="in" checked> Stock in (received / correction up)</label>
+  <label class="radio"><input type="radio" name="direction" value="out"> Stock out (damaged, lost, used / correction down)</label>
+  <label>Quantity<input name="qty" type="number" min="1" value="1" autofocus required></label>
+  <div class="row">
+    <button class="btn">Apply</button>
+    <a class="btn ghost" href="{{ url_for('inventory') }}">Back to inventory</a>
+  </div>
+</form>
+{% endblock %}

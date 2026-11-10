@@ -1,0 +1,64 @@
+ERP session log - 2026-11-06 (sets in POS + actions-column fixes)
+
+app.py
+- Added missing_set_components(conn, sid): reports components whose product row was purged
+  (product_id gone) or soft-deleted (active = 0).
+- Added route POST /pos/add/set/<int:sid>/items - loads the set's COMPONENT products into the
+  POS cart (respecting per_set qty and live stock) instead of adding one "set" cart line.
+  Blocks with a flash error if any component is missing/deleted or out of stock.
+- Wire-up: set_catalog / add_set_to_cart / checkout / inventory can_sell now use the
+  missing-component check, so a set with a deleted component shows "short: ... (deleted)",
+  can_sell = 0, and cannot be added or checked out.
+
+templates/pos.html
+- Sets strip (#setbar) placed directly under the Browse products button: live grid of set
+  cards (name, unit price, "N ready - M parts" or "short: ..."); sets remain inside the browse
+  modal too, below products.
+- Set add forms post to pos_add_set_items (tap a set -> its components land in the cart).
+- Browse modal now populates on open (change listener) so the grid isn't empty on a fresh page.
+
+templates/inventory.html
+- Set products tab: +POS / Edit / Delete wrapped in <div class="acts-grid g3">; +POS now posts
+  to pos_add_set_items; buttons dropped the tiny class.
+- All action cells (products g4, sets g3, categories g1, deleted g2) now wrap their buttons in
+  .acts-grid inside a normal table cell.
+- Removed native browser confirm() dialogs (inventory sets, product delete, product purge,
+  category delete, receipt void) -> two-step inline confirm: first click turns the button red
+  and reads "Sure?", second click within 4s submits; auto-disarms after 4s.
+- Sets table headers now carry width classes (w-setname / w-setcomps / w-setprice / w-setsell)
+  and the components cell uses class "small setcomps".
+
+static/style.css
+- POS sets strip: .setbar / .setbar-h / .setbar-grid (auto-fill minmax(148px,1fr),
+  grid-auto-rows 96px, max-height 200px, scrollable), 2-line clamping for .pname / .pstock so
+  long set names (TEST 1) no longer overflow their cards.
+- Root cause of the broken actions column: ".inv td.acts { display: grid }" made the <td> a
+  grid box, so it stopped stretching to the row height and its bottom border + row hover ended
+  short of the other columns. Replaced with ".inv td.acts { display: table-cell }" and moved the
+  button grid into .acts-grid (g1/g2/g3/g4 variants).
+- Sets action buttons enlarged: .acts-grid.g3 (3 x minmax(94px,1fr), .5rem gap) and
+  .inv td.acts-sets .btn { min-height 38px, font-size .9rem, padding .55rem .7rem };
+  column width 316px. Products/categories/deleted keep the old 27px tiny sizing.
+- Added sets column widths (200/420/118/88) and .inv td.setcomps { white-space: normal;
+  overflow-wrap: anywhere; } so component lists wrap instead of being ellipsized.
+- Added .btn.warn (red, bold) used by the inline "Sure?" confirm state.
+
+Data (erp.db)
+- Seeded 10 test sets, QA SET 01 - QA SET 10, alongside the pre-existing TEST 1 (left in place
+  for inspection; delete them from Inventory -> Set products when done).
+- Test sales created and voided during checkout/void verification; component stock restored.
+
+Verification
+- /tmp/test_sets.py (Flask test client, ~40 checks: set CRUD, POS strip rendering, cart
+  add/dec/remove, hold/resume, shortage blocking, checkout + component stock decrement, receipt,
+  void restoring stock, search/category filters, VAT, split payments, deleted-component edge
+  case) -> final run: FAILS: none.
+- Headless Chromium (Playwright chromium_headless_shell on CDP :9333) measured the sets table:
+  every cell in a row shares height and bottom edge (e.g. TEST 1 row 90px, all cells
+  bottom=697), actions buttons 104x38 with identical tops, no clipped labels, columns
+  217/456/128/96/343 at 1280px wide.
+
+Not changed this session
+- No changes to sales/purchases/customers logic, no schema migration.
+- The ERP server was started/stopped from this session; it is currently NOT running
+  (start with: cd ~/Desktop/ERP && python3 app.py).

@@ -1,0 +1,314 @@
+ERP DEV LOG — 2026-11-04 (session handoff file)
+Location: ~/Desktop/ERP   Stack: Flask 3.1.3 / Python 3.14.8 / SQLite (erp.db) / Jinja2 / single static/style.css
+Run: cd ~/Desktop/ERP && python3 app.py  ->  http://127.0.0.1:5000  (POS is the home page; "/" and "/pos" both render POS)
+Open in Chromium: flatpak run org.chromium.Chromium --new-window http://127.0.0.1:5000
+
+=====================================================================
+1. WHAT THIS APP IS
+=====================================================================
+Single-user local ERP, POS-first. Only active modules: POS, Inventory (with Categories + Deleted tabs), Suppliers, Sales/Receipt.
+Currency: tugrik "₮". money() filter prints whole amounts as 1,900,000₮ (no ".00"); decimals print as 1,900,000.50₮.
+
+Removed from the earlier Vortex-inspired build at user request:
+- stock locations / per-location stock
+- stock moves / transactions
+- transfers
+- cash sessions (opening/closing till, session reports)
+- separate Categories page (merged into Inventory)
+- separate Deleted-products page (merged into Inventory "Deleted" tab)
+- dashboard (POS became the main interface)
+- payment methods CashPay and leasing (rows deleted from payment_methods)
+Note: some old tables (stock, stock_movements, cash_sessions, locations) may still physically exist in erp.db but nothing in app.py reads or writes them.
+
+DB backups taken during this work:
+/tmp/erp_backup_2243.db       (before hand-fixing the subagent upgrade crash)
+/tmp/erp_before_merge_2257.db (before merging categories into inventory + removing locations/moves/sessions)
+/tmp/erp_before_import_*.db   (before the Excel import)
+
+=====================================================================
+2. ACTIVE TABLES (SCHEMA in app.py, CREATE TABLE IF NOT EXISTS + PRAGMA table_info migrations)
+=====================================================================
+products(id, sku, name, cost, price, qty, low_stock_at, created_at, barcode, brand, model, specifications, category_id, supplier_id, active)
+categories(id, name)
+suppliers(id, name, phone, notes ...)
+sales(id, ref, total, paid, change, item_count, created_at)
+payments(id, sale_id, method, amount, commission_percent, commission_mode, commission_amount)
+sale_items(...)
+payment_methods(key, label, commission_percent, commission_mode, active, sort)
+held_carts(id, label, cart_json, created_at)
+Stock is a single number: products.qty. Checkout decrements it; voiding a sale restores it.
+
+Payment methods now: cash, card, bank, mobile (commission modes ABSORBED / SURCHARGE).
+
+=====================================================================
+3. KEY ROUTES
+=====================================================================
+/ and /pos                     POS (search ?q=, category filter ?cat=)
+/pos/search                    JSON live autocomplete (name OR sku OR barcode OR brand, LIMIT 8, in-stock first)
+/pos/add/<id> /pos/dec/<id> /pos/remove/<id> /pos/clear   cart ops (POST)
+/pos/hold /pos/hold/resume/<id> /pos/hold/delete/<id>     held carts
+/pos/pay /pos/pay/exact /pos/pay/remove/<idx>             split payment lines (session['payments'])
+/pos/checkout                                            creates sale + sale_items + payments, decrements qty
+/inventory                    tabs: ?tab=products|categories|deleted
+/inventory/categories/add|rename/<id>|delete/<id>        category CRUD inside Inventory
+/product/new /product/edit/<id> /product/delete/<id> /product/restore/<id> /product/adjust/<id>
+/inventory/suppliers, /sales, /sales/<id> (printable receipt), /sales/<id>/void
+
+Cart lives in Flask session['cart'] = {product_id: qty}. Payment lines live in session['payments'].
+
+=====================================================================
+4. WHAT WAS DONE IN THIS SESSION (chronological)
+=====================================================================
+A. Merge + simplify
+- Categories managed inside Inventory (Products / Categories / Deleted tabs).
+- Removed locations, per-location stock, stock moves, transfers, cash sessions from app code; deleted templates
+  sessions.html, transactions.html, locations.html, categories.html, inventory_deleted.html, dashboard.html.
+- base.html nav reduced to: POS | Inventory | Suppliers | Sales.
+- adjust.html no longer asks for a location.
+- Removed CashPay/cashp/leasing/e_leasing rows from payment_methods.
+
+B. Stock import from Excel
+- Source: ~/Downloads/stock-balance-report-20261104.xlsx (892 rows; headers: SKU, Product Name, Category, Supplier,
+  Cost Price (₮), Retail Price (₮), Min Stock, Total Available, Total Reserved, Total On Order, Stock Value,
+  Location Details, Stock Status).
+- openpyxl is NOT installed, so the .xlsx was parsed with stdlib only: zipfile + ElementTree on
+  xl/sharedStrings.xml and xl/worksheets/sheet1.xml (helper: /tmp/xlsx_peek.py, import script: /tmp/import_stock.py).
+- 50 items imported, spread across categories (19 categories created), preserving the 1 pre-existing product.
+  sku -> sku + barcode (when numeric), name -> name (+ first word as brand), C -> category, E -> cost,
+  F -> price, G -> low_stock_at, H -> qty. Supplier column was "N/A" so no suppliers were created.
+- IMPORTANT quirk found: the report's Cost Price column is in thousands (e.g. 224 means 224,000₮). Applied x1000.
+  21 rows had cost 0 or implausible cost -> set to round(price*0.8, nearest 1000).
+  21 rows had 0 on hand -> restocked to random 1-6 so they are sellable in POS.
+- Result: 51 active products, 50 with qty > 0.
+
+C. POS UI rework
+- Removed the top "Scan barcode or SKU" bar. Barcode scanning now happens in the remaining search box:
+  type/paste a code, the live dropdown appears, Enter adds the top match.
+- Cart table restructured: colgroup widths (item auto, qty 104px, total 118px, x 42px); name on line 1 with
+  "950,000₮ each · SKU" beneath; qty controls wrapped in <span class="qtybox"> (− 26px box · number · + 26px box).
+  The td is a normal table cell again (making a td display:flex was what broke alignment).
+- Live search: JS in pos.html ({% block scripts %}, added {% block scripts %} to base.html), 110ms debounce,
+  fetch('/pos/search'), rows rendered as <button class="sug"> with srow (name + price baseline-aligned) and
+  smeta (code · category · n left). Click or Enter/ArrowUp/ArrowDown to add to cart; Esc closes; out-of-stock rows dimmed.
+- Products side made smaller: .pos grid 1.15fr / 1.05fr, cards minmax(126px,1fr), .prod min-height 72px, font .86rem.
+- Payment split now opens in a popup: hidden checkbox #pay-modal (class modal-toggle, CSS sibling selector,
+  no JavaScript) toggled by <label for="pay-modal" class="btn big">Proceed with payment</label>.
+  Modal has method select + amount + "Add payment" + "Pay remaining", payment lines table with fee text,
+  Goods/Surcharge/Total/Paid/Balance-or-Change rows, and "Complete sale" disabled until fully paid.
+
+D. Alignment fixes (three rounds; what actually mattered)
+- Global button hover had `transform: translateY(-2px) scale(1.025)`, which shifted highlighted dropdown rows and
+  tiny cart buttons out of their grid. Hover transforms are now scoped to .btn only and product cards, dropdown rows
+  and cart buttons are pinned to `transform: none`.
+- Dropdown highlight switched to `box-shadow: inset 0 0 0 1px var(--red)` (no border => no 1px layout nudge) and
+  `scrollbar-gutter: stable` + thin styled scrollbar so the row boxes keep the same width when the list scrolls.
+- .btn got `display:inline-flex; align-items:center; line-height:1.15; box-sizing:border-box` so a label.btn.big and a
+  neighbouring button have identical height.
+- Payment buttons moved from `.row` to `.paybar` (align-items:stretch, padding 0 .9rem so they line up with the
+  Cart total / payment bars above them; Proceed flexes to fill the row).
+- Modal inner blocks all share a 1rem gutter (.modal > p / table / payform / payrow / totalrow) so the
+  "Split the total across payment methods." text lines up with the table and totals.
+- Cache-busting added: base.html links style.css?v={{ asset_v('style.css') }} (mtime), so a plain reload picks up CSS.
+
+E. Animation rebuild (the "choppy" complaint)
+What was wrong: animations were repainting the main thread — transitions on background/box-shadow/border-color/filter,
+CSS gradients (gradients are NOT interpolatable, so hover looked like a hard cut), a 180px radial-gradient ripple on
+every button, and backdrop-filter: blur(10px) on the modal.
+What it is now (compositor-only: transform + opacity):
+- :root easings: --spring cubic-bezier(.2,.9,.3,1) for interactive states, --spring-out cubic-bezier(.16,1,.3,1) for
+  modal/dropdown entrances.
+- buttons: transition transform .16s var(--spring); hover translateY(-1px); active translateY(1px) scale(.985) .09s.
+- ripple pseudo-elements removed (leftovers `.qtybox .btn.tiny::after{content:none}` and `.sug::after{content:none}` are inert).
+- product card hover no longer swaps gradients (border + static box-shadow only).
+- modal: fade-in .20s backdrop + modal-rise .28s translateY(12px) only; backdrop-filter removed.
+- dropdown: suggest-in .18s translateY(-4px) only.
+- `@media (prefers-reduced-motion: reduce)` disables animation/transition.
+Reference used earlier: Chrome "Modern Web Guidance" physics-based easing advice (animate transform/opacity, avoid
+animating blur/backdrop-filter, spring-ish curves).
+
+=====================================================================
+5. ERRORS HIT AND HOW THEY WERE FIXED
+=====================================================================
+- NameError: name 'jsonify' is not defined -> added jsonify to the flask import line.
+- test_client checks initially hit /pos/pos (404); the correct path is /pos.
+- Flask background start: plain `nohup ... &` inside the tool shell died with the shell; `(setsid nohup python3 app.py >/tmp/erp.log 2>&1 &)` works. Server log: /tmp/erp.log.
+- Headless Chromium screenshot inside flatpak did not land in host /tmp until run as:
+  flatpak run --filesystem=/tmp org.chromium.Chromium --headless=new --screenshot=/tmp/x.png URL
+- Note: this model cannot view images, so CSS alignment was verified structurally (rendered HTML + rule reasoning), not visually.
+- Earlier in the project: subagent upgrade ran out of turns mid-rewrite; fixed by backing up erp.db and hand-writing app.py.
+  Migration bug `no such column: p.id` fixed with a simple UPDATE ... COALESCE((SELECT SUM(qty) FROM stock ...)) loop.
+  `Incorrect number of bindings` in /inventory/deleted fixed by supplying the location placeholder (moot after locations were removed).
+- Curl refused earlier only because the server was not running.
+
+=====================================================================
+6. KNOWN / OPEN ITEMS
+=====================================================================
+- Animations may still read as choppy if Chromium is not GPU-composited — check chrome://gpu. Also the Hyprland
+  GPU-order fix in ~/hypr-visual-jank-log.txt needs a full logout/login to take effect.
+- The .xlsx cost column is genuinely in thousands in the source report; re-imports must apply the same x1000 rule.
+- Excel rows with no location data were flattened to a single qty; the report's "Location Details" column is unused.
+- Dead tables remain in erp.db; a cleanup migration would be safe only with a fresh backup.
+- Nothing here is production-grade: dev secret key in app.py, no auth, no CSRF, SQLite file only.
+
+=====================================================================
+7. 2026-11-04 23:49-23:52 - INVENTORY SECTION LAYOUT FIX
+=====================================================================
+Problem: 10-column table in a 1050px container -> every column auto-sized, rows tall, action cell
+was `td class="row"` (flex + flex-wrap) so the 4 buttons wrapped raggedly, and `.btn:hover` moved
+them 1px. Filter form controls had different intrinsic heights (input ~40px vs btn ~35px).
+
+Changes:
+- base.html: `<main class="{% block mainclass %}{% endblock %}">`; inventory.html sets `wide`
+  -> `main.wide { max-width: 1320px; }` (only the Inventory page widens; POS/Sales stay 1050).
+- Both product tables use `<table class="inv">`: `table-layout: fixed` + explicit th widths
+  (w-sku 104, w-cat 108, w-brand 80, w-barcode 112, w-cost 104, w-retail 104, w-stock 58,
+  w-sup 108, w-acts 246 / w-acts2 140). Fixed sum 1024px -> Name column absorbs the rest (~258px).
+- Row size: `.inv th/td { padding: .34rem .5rem; font-size: .84rem; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis }`; Name wraps (`.inv td.name`), SKU/barcode mono.
+- Action cell is now a grid, not flex: `.inv td.acts` = 4 equal columns (products), `.two` = 2
+  (Deleted: Restore / Purge), `.one` = 1 (Categories: Delete). Forms inside act as grid items
+  (`form.inline { display: block }`) and buttons are `width: 100%` -> equal-size, single line, no wrap.
+  `.inv td.acts .btn.tiny:hover { transform: none }` pins them (hover only changes border/shadow).
+- "Delete permanently" button relabelled "Purge" so the compact cell has no wrapped text.
+- Categories table `class="inv cat"`: rename input flexes to fill the Name column, Save is a fixed
+  66px button, Products column 96px right-aligned.
+- Filter bar: `<form class="invbar">` (was `class="row"`) -> search input flexes, select fixed,
+  and search/select/Filter/Clear share `min-height: 38px` so their boxes line up.
+- `@media (max-width: 1180px)` hides the Brand and Barcode columns (`.opt` on th+td); with fixed
+  layout the remaining columns keep their widths.
+- Added `required` to the category rename input (no server change needed; category_edit reads name).
+
+Verification: all three tabs return 200 with the new classes (`inv`, `acts`, `invbar`); CSS braces
+balanced; column widths sum to 1024 (products) / 214 fixed + auto Name (categories) inside the
+1281.6px content width of main.wide. Screenshots written to /tmp/inv_products.png and
+/tmp/inv_cats.png but this model has no vision, so alignment is confirmed structurally, not visually.
+
+=====================================================================
+8. RESTART HANDOFF - logged 2026-11-04 23:53 (user restarting the session)
+=====================================================================
+Files changed in the inventory-layout pass (mtimes verified with ls):
+  templates/base.html      23:50   main now takes a {% block mainclass %} class
+  templates/inventory.html 23:52   invbar + table class="inv" + width classes + acts grid (+ .two/.one),
+                                   Barcode/Brand cells marked .opt, "Delete permanently" -> "Purge",
+                                   category rename input got `required`
+  static/style.css         23:52   new "Inventory tables" section (main.wide, .inv, .w-* widths,
+                                   .inv td.acts grid, .cat rename row, .invbar, @media 1180px)
+  app.py                   23:34   NOT touched in this pass (last change was the earlier session)
+  erp.db                   23:48   NOT touched in this pass - no writes, GETs only.
+  CHANGELOG-20261104.txt         this file (sections 7 and 8)
+
+No backups were needed (templates/CSS only, no DB or schema change). If you want to undo this pass,
+the only edits are those three files - app.py and erp.db are unchanged.
+
+After the restart:
+1. The Flask server dies with the session. Relaunch:
+     cd ~/Desktop/ERP && (setsid nohup python3 app.py >/tmp/erp.log 2>&1 &)
+   then: curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:5000/inventory   (expect 200)
+   Chromium: flatpak run org.chromium.Chromium --new-window http://127.0.0.1:5000/inventory
+2. This restart is also what applies the GPU-order fix from ~/hypr-visual-jank-log.txt. Check:
+     tr '\0' '\n' < /proc/$(pgrep -x Hyprland | head -1)/environ | grep AQ_DRM   -> /dev/dri/card1 first
+     hyprctl monitors -> expect eDP-1 2560x1600@300.00, scale 1.6
+3. Inventory checks worth doing by eye (this model has no vision, so screenshots /tmp/inv_products.png
+   and /tmp/inv_cats.png were written but not reviewed): row height, the 4-button action grid lining up,
+   and the filter bar (search / category select / Filter / Clear) sharing one baseline. If a product name
+   is clipped, widen .w-name or drop .w-brand / .w-barcode in static/style.css.
+
+=====================================================================
+9. 2026-11-05 16:40 - SKU HIDDEN FROM SEARCH/LISTS + SLOWER ANIMATIONS
+=====================================================================
+SKU/barcode are no longer displayed when searching or scanning lists; they are only shown for one specific
+product (Inventory -> Edit form, name="sku" / name="barcode"). Searching BY sku/barcode still works.
+- templates/pos.html: dropdown smeta now shows only "category - n left" (was "code - category - n left");
+  cart line cmeta is just "950,000₮ each" (SKU suffix removed).
+- templates/inventory.html: SKU column and Barcode column removed from both the Products and Deleted tables
+  (now Name / Category / Brand / Cost / Retail / Stock / Supplier / Actions).
+- static/style.css: .w-sku and .w-barcode deleted; rebalanced w-cat 122, w-brand 96, w-cost 112, w-retail 112,
+  w-stock 62, w-sup 122 -> fixed total 866px, Name absorbs the rest (~415px inside main.wide).
+  @media (max-width:1180px) still hides .opt (Brand only now).
+- Animation durations x ~1.75 (GPU-composited transform/opacity only, unchanged mechanics):
+  btn transform .16->.28s, btn active .09->.15s, prod/paybar active .10->.16s, nav/tab/chip .18->.30s,
+  flash slide-in .22->.36s, suggest-in .18->.30s, modal backdrop fade-in .20->.34s, modal-rise .28->.46s,
+  payform inputs .26->.44s. prefers-reduced-motion block untouched.
+Backups of the three files before this pass: /tmp/pos.html.bak /tmp/inventory.html.bak /tmp/style.css.bak
+Verified: /pos 200 + rendered <script> passes node --check; /inventory + ?tab=deleted + ?tab=categories 200;
+no ">SKU<" / ">Barcode<" headers remain; CSS braces balanced 213/213.
+
+=====================================================================
+10. 2026-11-05 16:50 - INVENTORY COLUMN-HEADER SORTING
+=====================================================================
+Every column header in the Inventory Products and Deleted tables is now a link: click to sort, click the same
+header again to flip direction. Name (A-Z, case-insensitive) is the default; Category / Brand / Cost / Retail /
+Stock / Supplier are sortable too. Sort survives filtering (q, cat, low), the Products<->Deleted tab switch, and
+search; the active column is shown in red with a small arrow (up = ascending, down = descending).
+- app.py: SORT_COLUMNS maps header key -> SQL expression (name/category/brand/supplier text with
+  IFNULL(...,'') COLLATE NOCASE; cost=p.cost, retail=p.price, stock=p.qty with IFNULL(...,0));
+  sort_args() reads ?sort= and ?sdir= (unknown values fall back to name/asc - no injection, whitelist only);
+  order_by() appends ", p.id" as tiebreaker. sort,sdir computed once in inventory() and passed to all three tabs.
+- templates/inventory.html: new h(key,label,cls) macro renders <th class="sortable ... on"><a href=...>;
+  the toggle is sdir = desc only when the same column is already asc; q/cat/low are carried into every header link.
+- static/style.css: .inv th.sortable (padding 0, link fills the cell), uppercase muted label, hover panel
+  background, .on + .arr in --red-hot, .num.sortable right-aligned. Durations match the new .28s spring.
+Verified 200: /inventory, ?sort=stock|retail|category|cost, ?sort=X&sdir=desc (rows ordered, checked against
+sqlite), ?tab=deleted&sort=cost&sdir=desc, ?tab=categories, ?q=a&sort=stock (q kept in header hrefs),
+?cat=N (cat kept), bogus sort/sdir ignored. Backups: /tmp/app.py.bak2 /tmp/inventory.html.bak2 /tmp/style.css.bak2
+
+=====================================================================
+11. 2026-11-05 17:05 - LONG NAMES, SUPPLIERS REMOVED, LIVE PAYMENT TYPING
+=====================================================================
+a) Long product names no longer inflate rows / knock the action buttons out of line:
+   .inv td.name is nowrap again (inherits overflow:hidden + text-overflow:ellipsis from .inv td) so every row is
+   one line; the full name (plus model) is in the title attribute tooltip and on the Edit page.
+   .inv td.acts gained align-items:center + grid-auto-rows:min-content and the tiny buttons got a fixed
+   height:27px + ellipsis -> all four buttons in every row are the same size on the same line.
+b) Suppliers tab deleted: nav link removed from base.html, templates/suppliers.html deleted, and the three routes
+   (inventory_suppliers / supplier_edit / supplier_delete) removed from app.py. /inventory/suppliers now 404.
+   The suppliers table and its data are untouched; products keep their supplier and the Supplier column +
+   supplier dropdown in the product form still work (existing suppliers only - no UI to add new ones now).
+c) Payment modal amount field: type=number replaced by type=text inputmode=numeric id=pay-amount (no spinners,
+   numeric keypad on touch) with live thousands grouping while typing (1900000 -> 1,900,000, caret preserved,
+   stray commas/dots/leading zeros cleaned). Totals recompute on every keystroke from the cart + payment lines:
+   Goods / Customer surcharge / Total / Paid / Balance due / Change back, plus three dashed preview rows that show
+   the typed amount, its fee, and what is still due / what change would come back after it (amber = exactly
+   covered, red = overpaid). parse_amount already strips commas, so the grouped text posts fine.
+   NOTE: Complete sale stays driven by committed payment lines - typing is a preview, it does not add a line.
+Backups before this pass: /tmp/app.py.bak3 /tmp/base.html.bak3 /tmp/pos.html.bak3 /tmp/inventory.html.bak3
+/tmp/style.css.bak3 /tmp/suppliers.html.bak3
+Verified: app.py parses (30 routes, 0 supplier refs), / 200, /pos 200, /inventory 200 (+sort), /inventory/new 200,
+/inventory/suppliers 404, cart->payment flow via test_client accepted amount "1,900,000" and rendered
+goods/total/paid/balance/change spans, rendered <script> passes node --check, group/fmt unit-tested in node.
+
+13. Payment modal simplified + VAT 10% toggle (2026-11-05)
+- Modal is now: payment lines (Method / Amount / x), method select (plain labels), amount field,
+  Goods / VAT 10% / Total / Paid / Balance due / Change back, one live preview row
+  ("Still due after it" -> "Exactly covered after it" -> "Change back after it").
+- Removed from the modal: Customer surcharge row, per-line Fee column, "This payment"/"Fee on it"
+  preview rows, and the +x% / (x% absorbed) suffixes on method names. Title is now "Payment".
+  surcharge_of()/absorbed_of() still record commission on payments (receipt Commission row unchanged).
+- pay_totals() now returns (total, paid, vat); customer total = goods + VAT. SURCHARGE gross-up in
+  /pos/pay/exact and /pos/api/pay/exact removed.
+- VAT: VAT_PERCENT = 10.0 in app.py (also a Jinja global). session["vat"] toggled by
+  POST /pos/vat (JSON when X-Requested-With: xhr, otherwise redirect with modal reopened).
+  VAT checkbox lives in its own form (#vat-form) so toggling never reloads the page.
+  Cleared to unchecked by /pos/checkout. New column sales.vat_amount (auto ALTER) written at checkout;
+  receipt shows a "VAT 10%" row and Goods = total - surcharge - vat.
+- Paid / Balance due / Change back rows now hidden when zero (change only appears when paid > total),
+  in the modal and in the cart summary block.
+- Verified with test_client: 1,900,000 goods -> VAT 190,000 -> Total 2,090,000; pay 50,000 -> balance
+  2,040,000; Pay remaining -> balance 0; +60,000 -> change 60,000; checkout stored vat_amount 190,000
+  and the receipt printed Goods/VAT/Total rows; test sale voided afterwards (stock restored, qty 13).
+  Rendered POS <script> passes node --check; live /pos returns 200 with the new markup.
+- Backups: /tmp/app.py.bak5, /tmp/pos.html.bak5, /tmp/receipt.html.bak5, /tmp/style.css.bak5.
+
+14. Payment modal: live Paid/Balance while typing + bigger modal + VAT switch (2026-11-05)
+- Removed the "Still due after it" preview row (and the now-unused state() helper / .payrow.preview CSS).
+- Typing an amount now feeds the Paid, Balance due and Change back rows in real time
+  (draw() builds live = committed + typed). Those three rows get class "live" (subtle red tint) while
+  typing. Committed lines are still what the server/Complete sale uses.
+- Modal is bigger: width min(820px, 96vw), 1.3rem inner margins, .payrow padding .62rem 1.15rem at 1rem
+  font, table cells .95rem, amount input 1.25rem, h2 1.5rem, close button 38px, modal-foot 1.3rem with
+  1.1rem Complete sale; "Proceed with payment" bar button is now 1.1rem / .85rem padding.
+- VAT toggle is a real switch: appearance:none 50x28 pill with a sliding 20px knob, amber->red gradient
+  + glow when on, amber label and #ffd8a8 amount, row background tinted when on.
+- Verified: node --check on the rendered script; stubbed-DOM run of draw() shows typed 1,000,000 ->
+  Paid 1,000,000 / Balance 900,000, typed 2,000,000 -> Change 100,000, VAT on + 700,000 -> Total
+  2,090,000 / Balance 1,390,000. Backups: /tmp/pos.html.bak6, /tmp/style.css.bak6.

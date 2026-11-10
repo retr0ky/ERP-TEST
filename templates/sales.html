@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Sales{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <h1>Sales</h1>
+  <a class="btn" href="{{ url_for('pos') }}">New sale</a>
+</div>
+
+<form method="get" action="{{ url_for('sales') }}" class="invbar" id="sales-search">
+  <input name="q" id="sales-q" type="search" autocomplete="off"
+         placeholder="Search ref, phone, note or item name" value="{{ q }}">
+  <button class="btn">Search</button>
+  {% if q %}<a class="btn ghost" href="{{ url_for('sales') }}">Clear</a>{% endif %}
+</form>
+
+<table>
+  <tr><th>Ref</th><th>When</th><th class="num">Items</th><th class="num">Total</th><th>Payment split</th><th>Customer</th><th></th></tr>
+  <tbody id="sales-rows"{% if not sales %} hidden{% endif %}>
+  {% for s in sales %}
+    <tr>
+      <td><a href="{{ url_for('receipt', sale_id=s['id']) }}">{{ s['ref'] }}</a></td>
+      <td class="muted">{{ s['created_at'] }}</td>
+      <td class="num">{{ s['item_count'] }}</td>
+      <td class="num">{{ s['total'] | money }}</td>
+      <td class="small">{{ s['split'] or '-' }}</td>
+      <td class="small">
+        {% if s['customer_phone'] %}
+          <a class="phone" href="{{ url_for('sales', q=s['customer_phone']) }}" data-q="{{ s['customer_phone'] }}">{{ s['customer_phone'] }}</a>
+        {% endif %}
+        {% if s['customer_note'] %}
+          <div class="muted" title="{{ s['customer_note'] }}">{{ s['customer_note'] }}</div>
+        {% endif %}
+        {% if not s['customer_phone'] and not s['customer_note'] %}<span class="muted">-</span>{% endif %}
+      </td>
+      <td class="num"><a class="btn tiny ghost" href="{{ url_for('receipt', sale_id=s['id']) }}">Receipt</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+  <tr class="sumrow"{% if not sales %} hidden{% endif %}><td colspan="3">Filtered total</td><td class="num" id="sales-total">{{ total | money }}</td><td colspan="3"></td></tr>
+</table>
+
+<p class="muted" id="sales-empty"{% if sales %} hidden{% endif %}>
+  {% if q %}No sales match "{{ q }}".{% else %}No sales recorded yet.{% endif %}
+</p>
+
+<script>
+(function () {
+  const input = document.getElementById('sales-q');
+  const form = document.getElementById('sales-search');
+  const rowsEl = document.getElementById('sales-rows');
+  const emptyEl = document.getElementById('sales-empty');
+  const totalEl = document.getElementById('sales-total');
+  const sumEl = document.querySelector('.sumrow');
+  if (!input || !form || !rowsEl || !emptyEl || !totalEl || !sumEl) return;
+  let seq = 0;
+
+  const cur = "₮";
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+  const fmt = (v) => {
+    const n = Number(v || 0);
+    if (Math.abs(n - Math.round(n)) < 1e-9) return n.toLocaleString('en-US', { maximumFractionDigits: 0 }) + cur;
+    return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + cur;
+  };
+
+  function rowHtml(s) {
+    const customer = [
+      s.customer_phone ? `<a class="phone" href="{{ url_for('sales') }}?q=${encodeURIComponent(s.customer_phone)}" data-q="${esc(s.customer_phone)}">${esc(s.customer_phone)}</a>` : '',
+      s.customer_note ? `<div class="muted" title="${esc(s.customer_note)}">${esc(s.customer_note)}</div>` : '',
+      (!s.customer_phone && !s.customer_note) ? '<span class="muted">-</span>' : ''
+    ].filter(Boolean).join('');
+    return `
+      <tr>
+        <td><a href="/sales/${s.id}">${esc(s.ref)}</a></td>
+        <td class="muted">${esc(s.created_at)}</td>
+        <td class="num">${esc(s.item_count)}</td>
+        <td class="num">${fmt(s.total)}</td>
+        <td class="small">${esc(s.split || '-')}</td>
+        <td class="small">${customer}</td>
+        <td class="num"><a class="btn tiny ghost" href="/sales/${s.id}">Receipt</a></td>
+      </tr>`;
+  }
+
+  function setUrl(q) {
+    const url = new URL(window.location);
+    if (q) url.searchParams.set('q', q);
+    else url.searchParams.delete('q');
+    history.replaceState(null, '', url);
+  }
+
+  async function search(q) {
+    const target = q.trim();
+    const mine = ++seq;
+    setUrl(target);
+    try {
+      const r = await fetch(`{{ url_for('sales') }}?format=json&q=${encodeURIComponent(target)}`, {
+        headers: { 'X-Requested-With': 'xhr' }
+      });
+      const d = await r.json();
+      if (mine !== seq || input.value.trim() !== target) return;   // stale response
+      const rows = d.rows || [];
+      rowsEl.innerHTML = rows.map(rowHtml).join('');
+      rowsEl.hidden = !rows.length;
+      sumEl.hidden = !rows.length;
+      emptyEl.hidden = rows.length > 0;
+      emptyEl.textContent = target ? `No sales match "${target}".` : 'No sales recorded yet.';
+      totalEl.textContent = fmt(d.total || 0);
+    } catch (err) {
+      emptyEl.hidden = false;
+      emptyEl.textContent = 'Search failed - try again.';
+    }
+  }
+
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => search(input.value), 120);
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    clearTimeout(timer);
+    search(input.value);
+  });
+  rowsEl.addEventListener('click', (e) => {
+    const phone = e.target.closest('a.phone');
+    if (!phone || !phone.dataset.q) return;
+    e.preventDefault();
+    input.value = phone.dataset.q;
+    clearTimeout(timer);
+    search(input.value);
+  });
+})();
+</script>
+{% endblock %}

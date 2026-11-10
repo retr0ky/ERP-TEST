@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}Inventory{% endblock %}
+{% block mainclass %}wide{% endblock %}
+{% block content %}
+{% macro h(key, label, cls='') %}
+  <th class="sortable {{ cls }}{{ ' on' if sort == key }}">
+    <a href="{{ url_for('inventory', tab=tab, q=q or None, cat=cat_id or None, low=low or None,
+                         sort=key, sdir=('desc' if sort == key and sdir == 'asc' else 'asc')) }}">
+      {{ label }}{% if sort == key %}<span class="arr">{{ '▲' if sdir == 'asc' else '▼' }}</span>{% endif %}</a>
+  </th>
+{% endmacro %}
+<div class="pagehead">
+  <h1>Inventory</h1>
+  <a class="btn no-print" href="{{ url_for('product_new') }}">Add product</a>
+</div>
+
+<div class="tabs no-print">
+  <a class="tab {{ 'on' if tab == 'products' }}" href="{{ url_for('inventory', sort=sort, sdir=sdir) }}">Products</a>
+  <a class="tab {{ 'on' if tab == 'sets' }}" href="{{ url_for('inventory', tab='sets') }}">Set products</a>
+  <a class="tab {{ 'on' if tab == 'categories' }}" href="{{ url_for('inventory', tab='categories') }}">Categories</a>
+  <a class="tab {{ 'on' if tab == 'deleted' }}" href="{{ url_for('inventory', tab='deleted', sort=sort, sdir=sdir) }}">Deleted</a>
+</div>
+
+{% if tab == 'products' %}
+  <form method="get" class="invbar no-print">
+    <input type="hidden" name="tab" value="products">
+    <input name="q" value="{{ q }}" placeholder="Search name, SKU, barcode or brand" autofocus>
+    <select name="cat">
+      <option value="">All categories</option>
+      {% for c in categories %}
+        <option value="{{ c['id'] }}" {{ 'selected' if c['id'] == cat_id }}>{{ c['name'] }}</option>
+      {% endfor %}
+    </select>
+    <label class="radio"><input type="checkbox" name="low" value="1" {{ 'checked' if low in ('1','on','yes') }}> Low stock only</label>
+    <button class="btn ghost">Filter</button>
+    {% if q or cat_id or low in ('1','on','yes') %}<a class="btn ghost" href="{{ url_for('inventory') }}">Clear</a>{% endif %}
+  </form>
+
+  {% if products %}
+    <table class="inv">
+      <tr>
+        {{ h('name', 'Name', 'w-name') }}
+        {{ h('category', 'Category', 'w-cat') }}
+        {{ h('brand', 'Brand', 'w-brand opt') }}
+        {{ h('cost', 'Cost', 'num w-cost') }}
+        {{ h('retail', 'Retail', 'num w-retail') }}
+        {{ h('stock', 'Stock', 'num w-stock') }}
+        {{ h('supplier', 'Supplier', 'w-sup') }}
+        <th class="acts">Actions</th>
+      </tr>
+      {% for p in products %}
+        <tr>
+          <td class="name" title="{{ p['name'] }}{% if p['model'] %} - {{ p['model'] }}{% endif %}">{{ p['name'] }}{% if p['model'] %} <span class="muted small">{{ p['model'] }}</span>{% endif %}</td>
+          <td class="muted">{{ p['category'] or '-' }}</td>
+          <td class="muted opt">{{ p['brand'] or '-' }}</td>
+          <td class="num">{{ p['cost'] | money }}</td>
+          <td class="num">{{ p['price'] | money }}</td>
+          <td class="num qty {{ 'bad' if p['qty'] == 0 }} {{ 'warn' if p['qty'] > 0 and p['qty'] <= p['low_stock_at'] }}">{{ p['qty'] }}</td>
+          <td class="muted">{{ p['supplier'] or '-' }}</td>
+          <td class="acts"><div class="acts-grid g4">
+            <form method="post" action="{{ url_for('pos_add', pid=p['id']) }}" class="inline">
+              <button class="btn tiny" title="Add to POS cart">+ POS</button>
+            </form>
+            <a class="btn tiny ghost" href="{{ url_for('product_adjust', pid=p['id']) }}">Stock</a>
+            <a class="btn tiny ghost" href="{{ url_for('product_edit', pid=p['id']) }}">Edit</a>
+            <form method="post" action="{{ url_for('product_delete', pid=p['id']) }}" class="inline"
+                  data-confirm="1">
+              <button class="btn tiny danger">Delete</button>
+            </form>
+          </div></td>
+        </tr>
+      {% endfor %}
+    </table>
+    <p class="muted small">{{ products | length }} product(s){% if low_count %} - {{ low_count }} at or under reorder level{% endif %}.</p>
+  {% else %}
+    <p class="muted">{% if q or cat_id or low in ('1','on','yes') %}No products match these filters.{% else %}No products yet - add your first one.{% endif %}</p>
+    <a class="btn" href="{{ url_for('product_new') }}">Add product</a>
+  {% endif %}
+{% elif tab == 'sets' %}
+  <div class="row no-print" style="margin:0 0 1rem">
+    <a class="btn" href="{{ url_for('set_new') }}">Create set</a>
+    <p class="muted small">Sets are bundles. They show as quick-add buttons on the POS page and sell as one line while reducing component stock.</p>
+  </div>
+  {% if sets %}
+    <table class="inv">
+      <tr><th class="w-setname">Name</th><th class="w-setcomps">Components</th><th class="num w-setprice">Price</th><th class="num w-setsell">Can sell</th><th class="acts w-setsacts">Actions</th></tr>
+      {% for s in sets %}
+        <tr>
+          <td class="name"><strong>{{ s['name'] }}</strong>{% if s['description'] %}<div class="muted small">{{ s['description'] }}</div>{% endif %}</td>
+          <td class="small setcomps">
+            {% for c in s['components'] %}
+              <div>{{ c['name'] }}{% if c['per_set'] != 1 %} x{{ c['per_set'] }}{% endif %} <span class="muted">({{ c['stock'] }} stock)</span></div>
+            {% endfor %}
+          </td>
+          <td class="num">{{ s['unit_price'] | money }}{% if s['price'] is none %}<div class="muted small">component total</div>{% endif %}</td>
+          <td class="num qty {{ 'bad' if s['can_sell'] == 0 }}">{{ s['can_sell'] }}</td>
+          <td class="acts acts-sets"><div class="acts-grid g3">
+            <form method="post" action="{{ url_for('pos_add_set_items', sid=s['id']) }}" class="inline">
+              <button class="btn" title="Add set to POS cart" {% if s['can_sell'] == 0 %}disabled{% endif %}>+ POS</button>
+            </form>
+            <a class="btn ghost" href="{{ url_for('set_edit', sid=s['id']) }}">Edit</a>
+            <form method="post" action="{{ url_for('set_delete', sid=s['id']) }}" class="inline"
+                  data-confirm="1">
+              <button class="btn danger">Delete</button>
+            </form>
+          </div></td>
+        </tr>
+      {% endfor %}
+    </table>
+    <p class="muted small">{{ sets | length }} active set(s).</p>
+  {% else %}
+    <p class="muted">No sets yet - create one and it appears as a quick-add option in POS.</p>
+    <a class="btn" href="{{ url_for('set_new') }}">Create set</a>
+  {% endif %}
+{% elif tab == 'categories' %}
+  <form method="post" action="{{ url_for('category_add') }}" class="form no-print">
+    <label>New category<input name="name" placeholder="e.g. PC parts" autofocus required></label>
+    <div class="row"><button class="btn">Add category</button></div>
+  </form>
+  {% if categories %}
+    <table class="inv cat">
+      <tr><th class="w-catname">Name</th><th class="num w-catcount">Products</th><th class="acts w-catdel">Actions</th></tr>
+      {% for c in categories %}
+        <tr>
+          <td class="catname">
+            <form method="post" action="{{ url_for('category_edit', cid=c['id']) }}" class="row inline">
+              <input name="name" value="{{ c['name'] }}" required>
+              <button class="btn tiny ghost">Save</button>
+            </form>
+          </td>
+          <td class="num qty">{{ c['product_count'] }}</td>
+          <td class="acts one"><div class="acts-grid g1">
+            <form method="post" action="{{ url_for('category_delete', cid=c['id']) }}" class="inline"
+                  data-confirm="1">
+              <button class="btn tiny danger">Delete</button>
+            </form>
+          </div></td>
+        </tr>
+      {% endfor %}
+    </table>
+    <p class="muted small">{{ categories | length }} category(s). They also appear as chips on the POS page.</p>
+  {% else %}
+    <p class="muted">No categories yet - add one and it appears as a chip on the POS page.</p>
+  {% endif %}
+{% elif tab == 'deleted' %}
+  {% if products %}
+    <table class="inv">
+      <tr>
+        {{ h('name', 'Name', 'w-name') }}
+        {{ h('category', 'Category', 'w-cat') }}
+        {{ h('brand', 'Brand', 'w-brand opt') }}
+        {{ h('cost', 'Cost', 'num w-cost') }}
+        {{ h('retail', 'Retail', 'num w-retail') }}
+        {{ h('stock', 'Stock', 'num w-stock') }}
+        {{ h('supplier', 'Supplier', 'w-sup') }}
+        <th class="acts w-acts2">Actions</th>
+      </tr>
+      {% for p in products %}
+        <tr>
+          <td class="name" title="{{ p['name'] }}">{{ p['name'] }}</td>
+          <td class="muted">{{ p['category'] or '-' }}</td>
+          <td class="muted opt">{{ p['brand'] or '-' }}</td>
+          <td class="num">{{ p['cost'] | money }}</td>
+          <td class="num">{{ p['price'] | money }}</td>
+          <td class="num qty muted">{{ p['qty'] }}</td>
+          <td class="muted">{{ p['supplier'] or '-' }}</td>
+          <td class="acts two"><div class="acts-grid g2">
+            <form method="post" action="{{ url_for('product_restore', pid=p['id']) }}" class="inline">
+              <button class="btn tiny">Restore</button>
+            </form>
+            <form method="post" action="{{ url_for('product_purge', pid=p['id']) }}" class="inline"
+                  data-confirm="1">
+              <button class="btn tiny danger">Purge</button>
+            </form>
+          </div></td>
+        </tr>
+      {% endfor %}
+    </table>
+    <p class="muted small">{{ products | length }} deleted product(s).</p>
+  {% else %}
+    <p class="muted">Nothing deleted. Deleting a product hides it here so past sales stay intact.</p>
+  {% endif %}
+{% endif %}
+
+  <script>
+  (function () {
+    document.addEventListener('submit', function (e) {
+      const f = e.target, b = f.querySelector('button');
+      if (!f.dataset.confirm || !b) return;
+      if (f.dataset.armed) return;
+      e.preventDefault();
+      f.dataset.armed = '1';
+      b.dataset.label = b.textContent;
+      b.textContent = 'Sure?';
+      b.classList.add('warn');
+      setTimeout(function () {
+        delete f.dataset.armed;
+        b.textContent = b.dataset.label;
+        b.classList.remove('warn');
+      }, 4000);
+    }, true);
+  })();
+  </script>
+
+{% endblock %}

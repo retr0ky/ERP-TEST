@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}{{ sale['ref'] }}{% endblock %}
+{% block content %}
+<div class="receipt">
+  <div class="pagehead">
+    <h1>{{ sale['ref'] }}</h1>
+    <div class="row no-print">
+      <button class="btn" onclick="window.print()">Print</button>
+      <a class="btn ghost" href="{{ url_for('sales') }}">All sales</a>
+      <a class="btn ghost" href="{{ url_for('pos') }}">New sale</a>
+      <form method="post" action="{{ url_for('sale_void', sale_id=sale['id']) }}" class="inline"
+            data-confirm="1">
+        <button class="btn danger">Void sale</button>
+      </form>
+    </div>
+  </div>
+  <p class="muted">{{ sale['created_at'] }}</p>
+  {% if sale['customer_phone'] or sale['customer_note'] %}
+    <div class="custinfo">
+      {% if sale['customer_phone'] %}
+        <span class="phone"><a href="{{ url_for('sales', q=sale['customer_phone']) }}">{{ sale['customer_phone'] }}</a></span>
+      {% endif %}
+      {% if sale['customer_note'] %}<span class="custnote">{{ sale['customer_note'] }}</span>{% endif %}
+    </div>
+  {% endif %}
+
+  <table>
+    <tr><th>Item</th><th class="num">Price</th><th class="num">Qty</th><th class="num">Total</th></tr>
+    {% for it in items %}
+      <tr>
+        <td>{{ it['name'] }}</td>
+        <td class="num">{{ it['price'] | money }}</td>
+        <td class="num">{{ it['qty'] }}</td>
+        <td class="num">{{ it['line_total'] | money }}</td>
+      </tr>
+    {% endfor %}
+    <tr class="sumrow"><td colspan="3">Goods</td><td class="num">{{ (sale['total'] - surcharge - vat) | money }}</td></tr>
+    {% if vat %}
+      <tr class="sumrow"><td colspan="3">VAT {{ VAT_PERCENT | round | int }}%</td><td class="num">{{ vat | money }}</td></tr>
+    {% endif %}
+    {% if surcharge %}
+      <tr class="sumrow"><td colspan="3">Customer surcharge</td><td class="num">{{ surcharge | money }}</td></tr>
+    {% endif %}
+    <tr class="sumrow"><td colspan="3">Total</td><td class="num">{{ sale['total'] | money }}</td></tr>
+  </table>
+
+  <h2>Payment</h2>
+  <table>
+    <tr><th>Method</th><th class="num">Amount</th><th class="num">Commission</th></tr>
+    {% for pay in pays %}
+      {% set pm = methods.get(pay['method']) %}
+      <tr>
+        <td>{{ PAY_METHODS.get(pay['method'], pay['method']) }}{% if pm and pm['commission_mode'] == 'SURCHARGE' %} <span class="muted small">+{{ pm['commission_percent'] | round(2) | int }}% surcharge</span>{% elif pm and pm['commission_percent'] %} <span class="muted small">{{ pm['commission_percent'] | round(2) | int }}% absorbed</span>{% endif %}{% if pay['note'] %}<div class="paynote">{{ pay['note'] }}</div>{% endif %}</td>
+        <td class="num">{{ pay['amount'] | money }}</td>
+        <td class="num muted">{{ (pay['commission_amount'] or 0) | money }}</td>
+      </tr>
+    {% endfor %}
+    <tr class="sumrow"><td>Commission</td><td class="num"></td><td class="num">{{ commission | money }}</td></tr>
+    <tr class="sumrow"><td>Paid</td><td class="num">{{ sale['paid'] | money }}</td><td class="num"></td></tr>
+    {% if sale['change'] > 0 %}
+      <tr class="sumrow"><td>Change</td><td class="num">{{ sale['change'] | money }}</td></tr>
+    {% endif %}
+  </table>
+</div>
+
+  <script>
+  (function () {
+    document.addEventListener('submit', function (e) {
+      const f = e.target, b = f.querySelector('button');
+      if (!f.dataset.confirm || !b) return;
+      if (f.dataset.armed) return;
+      e.preventDefault();
+      f.dataset.armed = '1';
+      b.dataset.label = b.textContent;
+      b.textContent = 'Sure?';
+      b.classList.add('warn');
+      setTimeout(function () {
+        delete f.dataset.armed;
+        b.textContent = b.dataset.label;
+        b.classList.remove('warn');
+      }, 4000);
+    }, true);
+  })();
+  </script>
+
+{% endblock %}

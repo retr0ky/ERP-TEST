@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% set s = stored or {} %}
+{% set names = {} %}
+{% set prodlist = [] %}
+{% for p in products %}
+  {% if names.update({p['id']: p['name']}) %}{% endif %}
+  {% if prodlist.append(dict(id=p['id'], name=p['name'], price=p['price'], qty=p['qty'],
+                             sku=p['sku'], brand=p['brand'], model=p['model'])) %}{% endif %}
+{% endfor %}
+{% block title %}{{ submit_label }}{% endblock %}
+{% block content %}
+<h1>{{ submit_label }}</h1>
+<form method="post" action="{{ action_url }}" class="form">
+  <label>Set name *<input name="name" value="{{ s['name'] or '' }}" required autofocus placeholder="Set 4 - Complete desktop"></label>
+  <label>Set price<input name="price" type="number" step="0.01" min="0" value="{{ s['price'] if s['price'] is not none else '' }}" placeholder="Leave blank to use component total"></label>
+  <label>Description<textarea name="description" rows="2">{{ s['description'] or '' }}</textarea></label>
+
+  <div class="row">
+    <strong>Components</strong>
+    <div id="set-components">
+      {% for c in components.items() %}
+        <div class="comp" data-pid="{{ c[0] }}">
+          <span>{{ names.get(c[0], 'Product') }}</span>
+          <input type="number" min="1" value="{{ c[1] }}" data-qty>
+          <button class="btn tiny danger" type="button" data-remove>Remove</button>
+          <input type="hidden" name="component_id" value="{{ c[0] }}">
+          <input type="hidden" name="component_qty" value="{{ c[1] }}">
+        </div>
+      {% endfor %}
+      <p class="muted small" id="comp-empty" {{ 'hidden' if components }}>No components yet — search a product below.</p>
+    </div>
+  </div>
+
+  <div class="row addcomp">
+    <label class="grow">Search product
+      <input id="comp-search" type="search" autocomplete="off" spellcheck="false"
+             placeholder="Type to find a product to add (name, brand, model)">
+    </label>
+    <label>Qty<input id="comp-qty" type="number" min="1" value="1"></label>
+    <button id="add-comp" class="btn ghost" type="button" disabled>Add component</button>
+  </div>
+  <div id="comp-results" class="comp-results" hidden></div>
+
+  <div class="row">
+    <button class="btn">{{ submit_label }}</button>
+    <a class="btn ghost" href="{{ url_for('inventory', tab='sets') }}">Cancel</a>
+  </div>
+</form>
+
+<script>
+(function () {
+  const comps = document.getElementById('set-components');
+  const compEmpty = document.getElementById('comp-empty');
+  const select = document.getElementById('comp-search');
+  const results = document.getElementById('comp-results');
+  const qty = document.getElementById('comp-qty');
+  const add = document.getElementById('add-comp');
+  const names = {{ names | tojson }};
+  const products = {{ prodlist | tojson }};
+
+  let picked = null;   // {id, name}
+  let matches = [];
+
+  function refresh(row) {
+    const num = row.querySelector('[data-qty]');
+    row.querySelector('input[name="component_qty"]').value =
+      Math.max(1, parseInt(num.value || '1', 10) || 1);
+  }
+
+  function syncEmpty() {
+    compEmpty.hidden = !!comps.querySelector('.comp');
+  }
+
+  function addRow(pid, q) {
+    const existing = [...comps.querySelectorAll('.comp')].find(r => String(r.dataset.pid) === String(pid));
+    if (existing) {
+      const num = existing.querySelector('[data-qty]');
+      num.value = (parseInt(num.value || '1', 10) || 1) + q;
+      refresh(existing);
+      syncEmpty();
+      return;
+    }
+    const row = document.createElement('div');
+    row.className = 'comp';
+    row.dataset.pid = pid;
+    row.innerHTML = `
+      <span>${names[pid] || 'Product'}</span>
+      <input type="number" min="1" value="${q}" data-qty>
+      <button class="btn tiny danger" type="button" data-remove>Remove</button>
+      <input type="hidden" name="component_id" value="${pid}">
+      <input type="hidden" name="component_qty" value="${q}">`;
+    comps.insertBefore(row, compEmpty);
+    syncEmpty();
+  }
+
+  function markPicked() {
+    results.querySelectorAll('.comp-hit').forEach(b => {
+      b.classList.toggle('on', picked && String(b.dataset.pid) === String(picked.id));
+    });
+  }
+
+  function renderResults() {
+    const term = select.value.trim().toLowerCase();
+    if (!term) { results.hidden = true; results.innerHTML = ''; matches = []; picked = null; return; }
+    const words = term.split(/\s+/);
+    matches = products.filter(p => {
+      const hay = `${p.name} ${p.sku || ''} ${p.brand || ''} ${p.model || ''}`.toLowerCase();
+      return words.every(w => hay.includes(w));
+    }).slice(0, 40);
+    results.hidden = false;
+    if (!matches.length) {
+      results.innerHTML = '<div class="comp-none">No products match.</div>';
+      picked = null;
+      add.disabled = true;
+      return;
+    }
+    results.innerHTML = matches.map(p => `
+      <button class="comp-hit" type="button" data-pid="${p.id}">
+        <span class="cname">${p.name}</span>
+        <span class="cmeta">${[p.brand, p.model, p.sku].filter(Boolean).join(' · ')}</span>
+        <span class="cstock">${p.qty} in stock</span>
+        <span class="cprice">${Number(p.price).toFixed(2)}</span>
+      </button>`).join('');
+    if (picked && !matches.some(m => String(m.id) === String(picked.id))) picked = null;
+    if (!picked) { picked = { id: matches[0].id, name: matches[0].name }; }
+    markPicked();
+    add.disabled = false;
+  }
+
+  select.addEventListener('input', renderResults);
+  select.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); doAdd(); }
+  });
+  results.addEventListener('click', (e) => {
+    const hit = e.target.closest('.comp-hit');
+    if (!hit) return;
+    picked = { id: hit.dataset.pid, name: names[hit.dataset.pid] };
+    markPicked();
+    add.disabled = false;
+    doAdd();
+  });
+
+  function doAdd() {
+    if (!picked) return;
+    addRow(picked.id, Math.max(1, parseInt(qty.value || '1', 10) || 1));
+    select.value = '';
+    results.hidden = true;
+    results.innerHTML = '';
+    matches = [];
+    picked = null;
+    qty.value = '1';
+    add.disabled = true;
+    select.focus();
+  }
+
+  add.addEventListener('click', doAdd);
+  comps.addEventListener('input', (e) => {
+    const row = e.target.closest('.comp');
+    if (row) refresh(row);
+  });
+  comps.addEventListener('click', (e) => {
+    if (e.target.matches('[data-remove]')) {
+      e.target.closest('.comp').remove();
+      syncEmpty();
+    }
+  });
+  syncEmpty();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,65 @@
+ERP session 2026-11-10 (Leasing payment method - completed)
+
+Backend (already written in the battery-cutoff session, verified intact)
+- payment_methods seed adds ("leasing", "Leasing", 0%, ABSORBED, active, sort 50, requires_note 1)
+- NOTE_REQUIRED_KEYS = {"leasing"}; payment_methods.requires_note column + migration
+- payments.note column + migration; clean_pay_note()/note_required()/pay_note_error()/note_of()
+- note enforced on /pos/pay, /pos/pay/exact and their /pos/api/* counterparts
+- checkout blocks completion while a required note is missing; pay_state() reports
+  per-line "note"/"needs_note" and can_complete accounts for it
+- payments.note stored on checkout; /sales split shows "[note]"; /sales?q= matches note text
+
+Frontend (finished this session - the part the battery cut off)
+- templates/pos.html: leasing <option> carries data-note="1"; #pay-note input in the pay form,
+  hidden until a note-requiring method is selected (syncNote on select change, cleared on
+  method switch and after a successful add, focus moves to it when needed)
+- pay lines show the typed note (.paynote) and a red "note missing" state (.paynote.miss),
+  server-rendered and in the JS paintLines path
+- Complete sale is disabled locally while a required note is missing (draw()) in addition to
+  the server's can_complete
+- JS PAYS entries now carry note (init + both d.lines mappings), so totals gating stays correct
+- templates/receipt.html: payment row prints the note under the method label
+- static/style.css: .paynote-input flex width, .payform input[hidden] display:none,
+  .paynote / .paynote.miss styles
+
+Verification
+- /tmp/test_leasing.py (Flask test client, 17 checks): option + note field markup, API and form
+  paths reject leasing without a note, note accepted and echoed in pay lines, can_complete
+  false while due / true once paid, payments.note persisted, note on receipt, in /sales split,
+  matched by /sales search, test sale voided with stock restored -> final run: FAILS: none
+- Live server (127.0.0.1:5000, debug reloader) returns 200 on /, /pos, /sales, /inventory
+- Not covered: no headless-browser run this session (playwright python module not installed),
+  so the note show/hide toggle is verified by rendered markup, not by click simulation.
+
+Search audit (every search path checked - POS box, browse box, autocomplete API, Inventory,
+barcode/SKU scan, Sets, Sales)
+
+Found and fixed
+- Multi-word queries were matched as one contiguous substring everywhere: 'rtx 5060' or
+  'gaming sandal' found nothing unless the name contained that exact spacing/order. Now every
+  typed word must match somewhere (AND across words, OR across name/SKU/barcode/brand).
+- Case: SQLite LIKE/LOWER only fold ASCII, so uppercase Cyrillic (ШИРЭЭ, ХАР) returned 0 hits
+  against names stored as "Ширээ". A norm() UDF (Python casefold) is registered on each
+  connection and all searches compare norm(column) - Cyrillic now matches in either case.
+- User-typed % and _ were live SQL wildcards: q='_' matched 52 products, q='%' matched all.
+  They are escaped and used with ESCAPE '\', so they search literally.
+- Browse grid priced everything 0₮: /pos/search returns price/price_num but the JS read
+  p.amount. API now returns amount as well.
+- Sets were searched two different ways - server used whole-query substring, the browse box JS
+  used all-words - so results changed depending on whether the grid was re-rendered. set_catalog
+  now uses the same all-words rule and also searches set description/components.
+- /pos/scan compared barcode/SKU with LOWER() (ASCII only) -> norm() equality.
+- Sales search only covered ref/phone/note and was single-substring; it now also matches the
+  item names stored on the sale (sale_items.name) and applies the word/case/escape rules.
+- Race conditions: POS live box, POS browse box and Sales live search had no ordering guard, so
+  a slow response for an older term could paint over a newer one (the "works then doesn't"
+  symptom) and a failed fetch was an unhandled rejection. All three now use a sequence token,
+  re-check the current input, and show an error on failure.
+
+Verification
+- /tmp/test_search.py (24 checks: multi-word + reversed words, Cyrillic upper/lower, literal
+  % and _, exact SKU, exact barcode, browse payload, browse page sets, inventory search,
+  scan hit/miss, sales ref/item-name/case/empty) -> FAILS: none
+- /tmp/test_leasing.py re-run after the changes -> FAILS: none
+- Live server: /pos/search?q=5060 rtx -> ASUS DUAL RTX5060; q=ХАР -> "Ширээ 120см - Хар";
+  /, /pos, /sales, /inventory all 200.

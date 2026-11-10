@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ERP{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ asset_v('style.css') }}">
+</head>
+<body>
+  <header class="topbar no-print">
+    <a class="brand" href="{{ url_for('pos') }}">ERP</a>
+    <nav>
+      {% set ep = request.endpoint %}
+      <a class="{{ 'active' if ep and ep.startswith('pos') }}" href="{{ url_for('pos') }}">POS</a>
+      <a class="{{ 'active' if ep and (ep == 'inventory' or ep == 'inventory_deleted' or ep.startswith('product_') or ep.startswith('category_')) }}" href="{{ url_for('inventory') }}">Inventory</a>
+      <a class="{{ 'active' if ep in ('sales', 'receipt') }}" href="{{ url_for('sales') }}">Sales</a>
+    </nav>
+  </header>
+  <main class="{% block mainclass %}{% endblock %}">
+    {% with msgs = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in msgs %}
+        <div class="flash {{ cat }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
