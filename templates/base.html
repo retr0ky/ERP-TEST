@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}ERP{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ asset_v('style.css') }}">
+  <script>
+    (function () {
+      var t = localStorage.getItem("erp-theme");
+      if (t && t !== "crimson") document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
 </head>
 <body>
   <header class="topbar no-print">
@@ -15,6 +21,18 @@
       <a class="{{ 'active' if ep and (ep == 'inventory' or ep == 'inventory_deleted' or ep.startswith('product_') or ep.startswith('category_')) }}" href="{{ url_for('inventory') }}">Inventory</a>
       <a class="{{ 'active' if ep in ('sales', 'receipt') }}" href="{{ url_for('sales') }}">Sales</a>
     </nav>
+    <div class="themesel">
+      <label for="erp-theme" class="small muted">Theme</label>
+      <select id="erp-theme" title="Colour palette">
+        <option value="crimson">Crimson</option>
+        <option value="ember">Ember</option>
+        <option value="ocean">Ocean</option>
+        <option value="forest">Forest</option>
+        <option value="violet">Violet</option>
+        <option value="slate">Slate</option>
+        <option value="paper">Paper</option>
+      </select>
+    </div>
   </header>
   <main class="{% block mainclass %}{% endblock %}">
     {% with msgs = get_flashed_messages(with_categories=true) %}
@@ -24,6 +42,23 @@
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
+  <script>
+    (function () {
+      var sel = document.getElementById("erp-theme");
+      if (!sel) return;
+      sel.value = localStorage.getItem("erp-theme") || "crimson";
+      sel.addEventListener("change", function () {
+        var v = sel.value;
+        if (v === "crimson") {
+          document.documentElement.removeAttribute("data-theme");
+          localStorage.removeItem("erp-theme");
+        } else {
+          document.documentElement.setAttribute("data-theme", v);
+          localStorage.setItem("erp-theme", v);
+        }
+      });
+    })();
+  </script>
   {% block scripts %}{% endblock %}
 </body>
 </html>
