@@ -1,0 +1,29 @@
+ERP -> Singapore move (2026-11-23, session notes)
+
+Done this session
+- vercel.json: added "regions": ["sin1"] (Singapore, ap-southeast-1). File is modified but NOT committed/pushed yet.
+  {
+    "builds": [{ "src": "api/index.py", "use": "@vercel/python" }],
+    "routes": [{ "src": "/((?!api/).*)", "dest": "/api/index.py" }],
+    "regions": ["sin1"]
+  }
+- Test site: https://erptestcomputermall-git-main-anands-projects-25177d07.vercel.app
+- Old DB (being deleted by user, test data only, loss OK):
+  libsql://test-erp-sithhell.aws-us-east-1.turso.io
+
+Still to do
+1. git commit + push so Vercel redeploys in sin1. Verify function region shows sin1
+   (unverified: whether legacy builds/routes honours "regions"; can also set Project Settings -> Functions -> Region = Singapore).
+2. Create new Turso group/db in aws-ap-southeast-1 (Singapore), get URL + token.
+3. Update ~/Desktop/ERP/.env TURSO_URL / TURSO_TOKEN, then: python3 sync_to_turso.py
+   (imports app -> init_db() creates schema, pushes 10 tables with ids preserved, bumps sqlite_sequence).
+   Local erp.db is the source of truth; nothing needs exporting from the old DB.
+4. Same two vars in Vercel -> Settings -> Environment Variables, redeploy.
+
+Facts checked
+- Vercel regions list includes sin1 (ap-southeast-1). Hobby plan: any single region; multi-region needs Pro/Enterprise.
+- Static assets are already on the CDN in every region; only the Python function's region matters for latency.
+- Turso added Singapore on 2026-11-04 (blog "Turso Cloud now runs in Singapore and Frankfurt"); slug aws-ap-southeast-1.
+  Previous nearest Turso region for SEA was Mumbai (aws-ap-south-1) at ~62 ms RTT vs ~1 ms in-region.
+
+Open issue from earlier: site felt slow - expect improvement once function (sin1) and DB (aws-ap-southeast-1) are co-located.
