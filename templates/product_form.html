@@ -6,6 +6,7 @@
 {% block content %}
 <h1>{{ action }} product</h1>
 <form method="post" class="form">
+{{ csrf_field }}
   <label>SKU<input name="sku" value="{{ p['sku'] or '' }}" placeholder="optional"></label>
   <label>Name *<input name="name" value="{{ p['name'] or '' }}" required autofocus></label>
   <label>Barcode<input name="barcode" value="{{ p['barcode'] or '' }}" placeholder="scan value or free-text slug like 120mmfan"></label>

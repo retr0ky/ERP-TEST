@@ -8,7 +8,8 @@ import sqlite3
 import app
 
 TABLES = ["categories", "suppliers", "products", "sets", "set_products",
-          "payment_methods", "sales", "sale_items", "payments", "held_carts"]
+          "payment_methods", "sales", "sale_items", "payments", "held_carts",
+          "inventory_logs", "shifts"]
 
 
 def shared_columns(local, remote, table):

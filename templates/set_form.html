@@ -11,6 +11,7 @@
 {% block content %}
 <h1>{{ submit_label }}</h1>
 <form method="post" action="{{ action_url }}" class="form">
+{{ csrf_field }}
   <label>Set name *<input name="name" value="{{ s['name'] or '' }}" required autofocus placeholder="Set 4 - Complete desktop"></label>
   <label>Set price<input name="price" type="number" step="0.01" min="0" value="{{ s['price'] if s['price'] is not none else '' }}" placeholder="Leave blank to use component total"></label>
   <label>Description<textarea name="description" rows="2">{{ s['description'] or '' }}</textarea></label>

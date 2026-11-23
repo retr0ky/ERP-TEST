@@ -59,12 +59,14 @@
           <td class="muted">{{ p['supplier'] or '-' }}</td>
           <td class="acts"><div class="acts-grid g4">
             <form method="post" action="{{ url_for('pos_add', pid=p['id']) }}" class="inline">
+{{ csrf_field }}
               <button class="btn tiny" title="Add to POS cart">+ POS</button>
             </form>
             <a class="btn tiny ghost" href="{{ url_for('product_adjust', pid=p['id']) }}">Stock</a>
             <a class="btn tiny ghost" href="{{ url_for('product_edit', pid=p['id']) }}">Edit</a>
             <form method="post" action="{{ url_for('product_delete', pid=p['id']) }}" class="inline"
                   data-confirm="1">
+{{ csrf_field }}
               <button class="btn tiny danger">Delete</button>
             </form>
           </div></td>
@@ -96,11 +98,13 @@
           <td class="num qty {{ 'bad' if s['can_sell'] == 0 }}">{{ s['can_sell'] }}</td>
           <td class="acts acts-sets"><div class="acts-grid g3">
             <form method="post" action="{{ url_for('pos_add_set_items', sid=s['id']) }}" class="inline">
+{{ csrf_field }}
               <button class="btn" title="Add set to POS cart" {% if s['can_sell'] == 0 %}disabled{% endif %}>+ POS</button>
             </form>
             <a class="btn ghost" href="{{ url_for('set_edit', sid=s['id']) }}">Edit</a>
             <form method="post" action="{{ url_for('set_delete', sid=s['id']) }}" class="inline"
                   data-confirm="1">
+{{ csrf_field }}
               <button class="btn danger">Delete</button>
             </form>
           </div></td>
@@ -114,6 +118,7 @@
   {% endif %}
 {% elif tab == 'categories' %}
   <form method="post" action="{{ url_for('category_add') }}" class="form no-print">
+{{ csrf_field }}
     <label>New category<input name="name" placeholder="e.g. PC parts" autofocus required></label>
     <div class="row"><button class="btn">Add category</button></div>
   </form>
@@ -124,6 +129,7 @@
         <tr>
           <td class="catname">
             <form method="post" action="{{ url_for('category_edit', cid=c['id']) }}" class="row inline">
+{{ csrf_field }}
               <input name="name" value="{{ c['name'] }}" required>
               <button class="btn tiny ghost">Save</button>
             </form>
@@ -132,6 +138,7 @@
           <td class="acts one"><div class="acts-grid g1">
             <form method="post" action="{{ url_for('category_delete', cid=c['id']) }}" class="inline"
                   data-confirm="1">
+{{ csrf_field }}
               <button class="btn tiny danger">Delete</button>
             </form>
           </div></td>
@@ -166,10 +173,12 @@
           <td class="muted">{{ p['supplier'] or '-' }}</td>
           <td class="acts two"><div class="acts-grid g2">
             <form method="post" action="{{ url_for('product_restore', pid=p['id']) }}" class="inline">
+{{ csrf_field }}
               <button class="btn tiny">Restore</button>
             </form>
             <form method="post" action="{{ url_for('product_purge', pid=p['id']) }}" class="inline"
                   data-confirm="1">
+{{ csrf_field }}
               <button class="btn tiny danger">Purge</button>
             </form>
           </div></td>

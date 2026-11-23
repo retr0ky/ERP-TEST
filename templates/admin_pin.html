@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Admin PIN{% endblock %}
+{% block content %}
+<form method="post" action="{{ back }}" class="form payform">
+  <h2>Manager PIN required</h2>
+  <p class="muted small">Voids, stock adjustments and deletes are admin-only. The PIN unlocks
+    the admin tier for {{ admin_window // 60 }} minutes.</p>
+  {% for key, value in form.items() %}{% if key != 'csrf' %}
+  <input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
+  <input type="password" name="admin_pin" id="admin_pin" autocomplete="off" autofocus
+         placeholder="Manager PIN" maxlength="32">
+  <button class="btn big">Unlock and continue</button>
+</form>
+<script>document.getElementById('admin_pin').focus();</script>
+{% endblock %}

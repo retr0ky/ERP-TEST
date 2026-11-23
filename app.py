@@ -82,7 +82,65 @@ def login():
 @app.route("/logout")
 def logout():
     session.pop("authed", None)
+    session.pop("admin_until", None)
     return redirect(url_for("login"))
+
+
+# ------------------------------------------------- CSRF + admin PIN (tier 2)
+ADMIN_PASSWORD = os.environ.get("ERP_ADMIN_PASSWORD") or ""
+ADMIN_WINDOW = int(os.environ.get("ERP_ADMIN_WINDOW") or 900)
+MAX_CART_LINES = int(os.environ.get("ERP_MAX_CART_LINES") or 60)
+import time
+
+
+ADMIN_ONLY = {"product_adjust", "product_delete", "product_purge", "product_restore",
+            "category_delete", "set_delete", "sale_void"}
+
+@app.before_request
+def csrf_gate():
+    """Session token must come back on every mutating request (form field or header)."""
+    if "csrf" not in session:
+        session["csrf"] = secrets.token_hex(16)
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    sent = request.form.get("csrf") or request.headers.get("X-CSRF-Token") or ""
+    if not hmac.compare_digest(sent, session.get("csrf", "")):
+        return render_template("error.html", msg="Session expired - reload the page and try again."), 400
+    if request.endpoint in ADMIN_ONLY:
+        return admin_gate()
+
+
+def is_admin():
+    if not ADMIN_PASSWORD:
+        return True                       # single-user install: no second tier configured
+    until = session.get("admin_until") or 0
+    return time.time() < until
+
+
+def admin_gate():
+    """None when the caller may proceed, otherwise the PIN prompt to render."""
+    if is_admin():
+        return None
+    sent = request.values.get("admin_pin") or request.headers.get("X-Admin-Pin") or ""
+    if sent and hmac.compare_digest(sent, ADMIN_PASSWORD):
+        session["admin_until"] = time.time() + ADMIN_WINDOW
+        return None
+    return render_template("admin_pin.html", form=dict(request.form),
+                           back=request.path, admin_window=ADMIN_WINDOW), 401
+
+
+def actor():
+    return "admin" if (ADMIN_PASSWORD and is_admin()) else "cashier"
+
+
+@app.context_processor
+def security_globals():
+    from markupsafe import Markup
+    return {"csrf_token": session.get("csrf", ""),
+            "csrf_field": Markup('<input type="hidden" name="csrf" value="'
+                                   + session.get("csrf", "") + '">'),
+            "is_admin": is_admin(),
+            "ADMIN_ON": bool(ADMIN_PASSWORD)}
 
 app.jinja_env.globals["CURRENCY"] = CURRENCY
 app.jinja_env.globals["VAT_PERCENT"] = VAT_PERCENT
@@ -101,7 +159,7 @@ app.jinja_env.globals["asset_v"] = asset_v
 
 # Bump this whenever SCHEMA/migrations below change - it is what lets a hosted
 # database skip the whole migration crawl on boot (6.7s of round trips -> 2).
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "5"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -195,6 +253,37 @@ CREATE TABLE IF NOT EXISTS set_products (
     qty INTEGER NOT NULL DEFAULT 1,
     UNIQUE (set_id, product_id)
 );
+/* FK columns - every one of these is a separate Turso round trip per sale page,
+   receipt and set breakdown, so they must not be full scans. */
+CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);
+CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id);
+CREATE INDEX IF NOT EXISTS idx_payments_sale ON payments(sale_id);
+CREATE INDEX IF NOT EXISTS idx_set_products_set ON set_products(set_id);
+CREATE TABLE IF NOT EXISTS inventory_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    old_qty INTEGER,
+    new_qty INTEGER,
+    delta INTEGER NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    actor TEXT,
+    sale_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS shifts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opened_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    closed_at TEXT,
+    opening_float REAL NOT NULL DEFAULT 0,
+    counted_cash REAL,
+    drops REAL NOT NULL DEFAULT 0,
+    note TEXT
+);
+/* One permanent row: a stock guard that fails inserts id 1 a second time and
+   aborts the whole checkout transaction instead of going negative. */
+CREATE TABLE IF NOT EXISTS stock_guards (id INTEGER PRIMARY KEY);
+CREATE INDEX IF NOT EXISTS idx_inv_logs_product ON inventory_logs(product_id);
+CREATE INDEX IF NOT EXISTS idx_inv_logs_created ON inventory_logs(created_at);
 """
 
 PRODUCT_COLUMNS = [
@@ -312,6 +401,27 @@ def as_sqlite_error(exc):
     return exc
 
 
+def sqllit(value):
+    """Safe SQL literal - names, notes and amounts go into a script as literals."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    return "'" + str(value).replace("\x00", "").replace("'", "''") + "'"
+
+
+def log_stock(conn, pid, delta, reason, sale_id=None):
+    """One row per stock change: who, how much, why, when."""
+    conn.execute("""
+        INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
+        SELECT id, qty, qty + ?, ?, ?, ?, ? FROM products WHERE id = ?""",
+        (delta, delta, reason, actor(), sale_id, pid))
+
+
 class DB:
     """Thin adapter so a single code path serves local SQLite and hosted Turso."""
 
@@ -334,6 +444,16 @@ class DB:
 
     def executescript(self, sql):
         self._guard(self._c.executescript, sql)
+
+    def script(self, statements):
+        """One round trip, one transaction: the whole checkout travels together.
+
+        A failing statement (a stock guard, a unique clash) aborts every statement
+        in the script, so no half-written sale can survive.
+        """
+        self.executescript("BEGIN IMMEDIATE;\n"
+                           + ";\n".join(st.strip().rstrip(";") for st in statements)
+                           + ";\nCOMMIT;")
 
     def commit(self):
         self._guard(self._c.commit)
@@ -455,9 +575,17 @@ def init_db(conn=None):
             conn.close()
         return                       # already built: 2 round trips instead of ~30
     conn.executescript(SCHEMA)
+    conn.execute("INSERT OR IGNORE INTO stock_guards (id) VALUES (1)")
     add_columns(conn, "products", PRODUCT_COLUMNS)
     add_columns(conn, "payments", PAYMENT_COLUMNS)
     add_columns(conn, "sale_items", SALE_ITEM_COLUMNS)
+
+    # These need columns that ALTER TABLE added, so they come after add_columns.
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_products_active_name ON products(active, name);
+        CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
+        CREATE INDEX IF NOT EXISTS idx_sets_active ON sets(active, name);
+    """)
 
     cols = {r[1] for r in conn.execute("PRAGMA table_info(sales)").fetchall()}
     add_columns(conn, "sales", SALE_COLUMNS)
@@ -755,6 +883,8 @@ def product_adjust(pid):
             flash(f"Cannot remove {qty} - only {p['qty']} in stock.", "error")
         else:
             new_qty = p["qty"] + (qty if direction == "in" else -qty)
+            log_stock(d, pid, new_qty - p["qty"],
+                      (request.form.get("reason") or "manual adjustment").strip()[:200])
             d.execute("UPDATE products SET qty = ? WHERE id = ?", (new_qty, pid))
             d.commit()
             flash(f"Stock updated: {p['name']} now {new_qty}.", "ok")
@@ -993,6 +1123,42 @@ def save_customer(phone, note):
     return {"phone": phone, "note": note}
 
 
+def is_fx():
+    """True when the caller asked for the cart fragment instead of a page reload."""
+    return request.headers.get("X-FX") == "1"
+
+
+def cart_context():
+    """Everything the cart column needs - one place, reused by /pos and by the partial."""
+    d = db()
+    entries, goods_total = cart_entries()
+    cart_sets, set_total = set_entries()
+    goods_total = round(goods_total + set_total, 2)
+    pays = payment_lines()
+    total, paid, vat = pay_totals(d, pays, goods_total)
+    held = d.execute("SELECT * FROM held_carts ORDER BY id DESC").fetchall()
+    _, cart_errors, _, shortages = cart_requirements(entries, cart_sets)
+    return dict(cart=entries, cart_sets=cart_sets, total=total, goods_total=goods_total,
+                vat=vat, short={s["id"]: s for s in shortages}, cart_errors=cart_errors,
+                pays=pays, paid=paid, balance=max(total - paid, 0), change=max(paid - total, 0),
+                held=held, customer=customer_data(),
+                q=(request.values.get("q") or "").strip(),
+                cat=to_int(request.values.get("cat")),
+                browse=(request.values.get("browse") or "").strip() == "1",
+                open_pay=(request.values.get("open") or "").strip() == "1",
+                pay_methods=payment_rows(active_only=True),
+                NOTE_KEYS=[r["key"] for r in payment_rows(active_only=True) if r["requires_note"]],
+                pm_map=payment_map())
+
+
+def cart_partial():
+    # The wrapper carries the mount id: erpFx swaps outerHTML, so the fragment has to
+    # re-supply #cart-panel or the second cart action would have nothing to replace.
+    return ('<div id="cart-panel">'
+            + render_template("_cart_panel.html", **cart_context())
+            + '</div>')
+
+
 def pos_redirect(include_open=False):
     q = (request.values.get("q") or "").strip()
     cat = (request.values.get("cat") or "").strip()
@@ -1005,6 +1171,8 @@ def pos_redirect(include_open=False):
         args["browse"] = "1"
     if include_open:
         args["open"] = "1"
+    if is_fx():
+        return cart_partial()
     return redirect(url_for("pos", **args))
 
 
@@ -1319,6 +1487,8 @@ def pos_scan():
 def add_to_cart(pid, name, qty_available=None):
     cart = session.get("cart", {})
     key = str(pid)
+    if key not in cart and len(cart) >= MAX_CART_LINES:
+        return f"Cart already holds {MAX_CART_LINES} different items - sell or clear some first."
     cart[key] = cart.get(key, 0) + 1
     session["cart"] = cart
     return None
@@ -1712,40 +1882,63 @@ def pos_checkout():
                           else saved.get("note"))
     conn = db()
     item_count = sum(q for _, q in entries) + sum(q for _, q in cart_sets)
-    cur = conn.execute(
-        """INSERT INTO sales (ref, total, paid, change, item_count, vat_amount,
-                              customer_phone, customer_note, n_search)
-           VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (total, paid, max(paid - total, 0), item_count, vat,
-         cust_phone or None, cust_note or None, blob_of("", cust_phone, cust_note)))
-    sale_id = cur.lastrowid
-    ref = f"SALE-{sale_id:05d}"
-    conn.execute("UPDATE sales SET ref = ?, n_search = ? WHERE id = ?",
-                 (ref, blob_of(ref, cust_phone, cust_note), sale_id))
     pm_map = payment_map()
-    for p, qty in entries:
-        conn.execute(
-            "INSERT INTO sale_items (sale_id, product_id, name, price, qty, line_total, n_name)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sale_id, p["id"], p["name"], p["price"], qty, p["price"] * qty, norm(p["name"])))
-    for s, qty in cart_sets:
-        conn.execute(
-            """INSERT INTO sale_items (sale_id, product_id, set_id, name, price, qty, line_total, n_name)
-               VALUES (?, NULL, ?, ?, ?, ?, ?, ?)""",
-            (sale_id, s["id"], s["name"], s["unit_price"], qty, s["unit_price"] * qty, norm(s["name"])))
+    # Sale id is chosen up front so the whole sale can travel in one script.
+    sale_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM sales").fetchone()[0]
+    ref = f"SALE-{sale_id:05d}"
+    stmts = []
     for pid, qty in need.items():
-        conn.execute("UPDATE products SET qty = qty - ? WHERE id = ?", (qty, pid))
+        # Guard: fires only when stock cannot cover the sale -> aborts the script.
+        stmts.append("INSERT INTO stock_guards (id) SELECT 1 WHERE"
+                     " COALESCE((SELECT qty FROM products WHERE id = %d), -1) < %d" % (pid, qty))
+    stmts.append("""INSERT INTO sales (id, ref, total, paid, change, item_count, vat_amount,
+                                      customer_phone, customer_note, n_search)
+                    VALUES (%d, %s, %s, %s, %s, %d, %s, %s, %s, %s)"""
+                 % (sale_id, sqllit(ref), sqllit(total), sqllit(paid),
+                    sqllit(max(paid - total, 0)), item_count, sqllit(vat),
+                    sqllit(cust_phone or None), sqllit(cust_note or None),
+                    sqllit(blob_of(ref, cust_phone, cust_note))))
+    for p, qty in entries:
+        stmts.append("""INSERT INTO sale_items (sale_id, product_id, name, price, qty, line_total, n_name)
+                        VALUES (%d, %d, %s, %s, %d, %s, %s)"""
+                     % (sale_id, p["id"], sqllit(p["name"]), sqllit(p["price"]), qty,
+                        sqllit(p["price"] * qty), sqllit(norm(p["name"]))))
+    for s, qty in cart_sets:
+        stmts.append("""INSERT INTO sale_items (sale_id, product_id, set_id, name, price, qty, line_total, n_name)
+                        VALUES (%d, NULL, %d, %s, %s, %d, %s, %s)"""
+                     % (sale_id, s["id"], sqllit(s["name"]), sqllit(s["unit_price"]),
+                        qty, sqllit(s["unit_price"] * qty), sqllit(norm(s["name"]))))
+    who = sqllit(actor())
+    for pid, qty in need.items():
+        stmts.append("""INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
+                        SELECT id, qty, qty - %d, -%d, 'sale', %s, %d FROM products WHERE id = %d"""
+                     % (qty, qty, who, sale_id, pid))
+        stmts.append("UPDATE products SET qty = qty - %d WHERE id = %d AND qty >= %d"
+                     % (qty, pid, qty))
     for pay in pays:
         pm = pm_map.get(pay["method"]) or {}
         note = clean_pay_note(pay.get("note"))
-        conn.execute(
-            """INSERT INTO payments (sale_id, method, amount, commission_percent,
-                                     commission_mode, commission_amount, note, n_note)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (sale_id, pay["method"], pay["amount"], pm.get("commission_percent") or 0,
-             pm.get("commission_mode"), absorbed_of(pm, pay["amount"]) + surcharge_of(pm, pay["amount"]),
-             note or None, norm(note)))
-    conn.commit()
+        stmts.append("""INSERT INTO payments (sale_id, method, amount, commission_percent,
+                                             commission_mode, commission_amount, note, n_note)
+                        VALUES (%d, %s, %s, %s, %s, %s, %s, %s)"""
+                     % (sale_id, sqllit(pay["method"]), sqllit(pay["amount"]),
+                        sqllit(pm.get("commission_percent") or 0), sqllit(pm.get("commission_mode")),
+                        sqllit(absorbed_of(pm, pay["amount"]) + surcharge_of(pm, pay["amount"])),
+                        sqllit(note or None), sqllit(norm(note))))
+    try:
+        conn.script(stmts)
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        names = {p["id"]: p["name"] for p, _ in entries}
+        for s, _ in cart_sets:
+            for c in s["components"]:
+                names.setdefault(c["id"], c["name"])
+        flash(f"Cannot complete the sale: {names.get(pid, 'an item')} was just sold out "
+              f"by another session. The cart is untouched - re-check stock and try again.",
+              "error")
+        if not DEBUG_MODE:
+            app.logger.warning("checkout aborted (sale %s): %s", ref, exc)
+        return pos_redirect(True)
     session["cart"] = {}
     session["sets"] = {}
     session["payments"] = []
@@ -1836,10 +2029,12 @@ def sale_void(sale_id):
         for it in conn.execute("SELECT * FROM sale_items WHERE sale_id = ?",
                                (sale_id,)).fetchall():
             if it["product_id"] is not None:
+                log_stock(conn, it["product_id"], it["qty"], "sale voided", sale["id"])
                 conn.execute("UPDATE products SET qty = qty + ? WHERE id = ?",
                              (it["qty"], it["product_id"]))
             elif it["set_id"] is not None:
                 for c in set_components(conn, it["set_id"]):
+                    log_stock(conn, c["id"], it["qty"] * c["per_set"], "sale voided", sale["id"])
                     conn.execute("UPDATE products SET qty = qty + ? WHERE id = ?",
                                  (it["qty"] * c["per_set"], c["id"]))
         conn.execute("DELETE FROM sale_items WHERE sale_id = ?", (sale_id,))

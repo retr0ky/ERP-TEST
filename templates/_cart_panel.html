@@ -1,0 +1,206 @@
+{% with msgs = get_flashed_messages(with_categories=true) %}
+{% for kind, msg in msgs %}<div class="flash {{ kind }}">{{ msg }}</div>{% endfor %}
+{% endwith %}
+    <h2>Cart</h2>
+    {% if cart or cart_sets %}
+      <table class="cart">
+        <colgroup><col class="c-item"><col class="c-qty"><col class="c-total"><col class="c-x"></colgroup>
+        <tr><th>Item</th><th class="num">Qty</th><th class="num">Total</th><th></th></tr>
+        {% for p, qty in cart %}
+          {% set sh = short.get(p['id']) %}
+          <tr class="{{ 'oos' if sh }}">
+            <td class="c-item">
+              <span class="cname">{{ p['name'] }}</span>
+              <span class="cmeta">{{ p['price'] | money }} each</span>
+              {% if sh %}<span class="oosbadge">out of stock - need {{ sh['need'] }}, have {{ sh['stock'] }}</span>{% endif %}
+            </td>
+            <td class="num cartqty"><span class="qtybox">
+              <form method="post" action="{{ url_for('pos_dec', pid=p['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny ghost" title="one fewer">−</button></form>
+{{ csrf_field }}
+              <span class="qn">{{ qty }}</span>
+              <form method="post" action="{{ url_for('pos_add', pid=p['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny ghost" title="one more">+</button></form>
+{{ csrf_field }}
+            </span></td>
+            <td class="num c-total">{{ (p['price'] * qty) | money }}</td>
+            <td class="num c-x"><form method="post" action="{{ url_for('pos_remove', pid=p['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny danger" title="remove">✕</button></form></td>
+{{ csrf_field }}
+          </tr>
+        {% endfor %}
+        {% for s, qty in cart_sets %}
+          {% set sshort = [] %}
+          {% for c in s['components'] %}
+            {% if short.get(c['id']) %}{% if sshort.append(short[c['id']]) %}{% endif %}{% endif %}
+          {% endfor %}
+          <tr class="{{ 'oos' if sshort }}">
+            <td class="c-item">
+              <span class="cname">{{ s['name'] }}</span>
+              <span class="cmeta">{{ s['unit_price'] | money }} set{% if s['price'] is none %} (component total){% endif %}</span>
+              {% for sh in sshort %}
+                <span class="oosbadge">{{ sh['name'] }} out of stock - need {{ sh['need'] }}, have {{ sh['stock'] }}</span>
+              {% endfor %}
+            </td>
+            <td class="num cartqty"><span class="qtybox">
+              <form method="post" action="{{ url_for('pos_dec_set', sid=s['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny ghost" title="one fewer">−</button></form>
+{{ csrf_field }}
+              <span class="qn">{{ qty }}</span>
+              <form method="post" action="{{ url_for('pos_add_set_items', sid=s['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny ghost" title="one more">+</button></form>
+{{ csrf_field }}
+            </span></td>
+            <td class="num c-total">{{ (s['unit_price'] * qty) | money }}</td>
+            <td class="num c-x"><form method="post" action="{{ url_for('pos_remove_set', sid=s['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny danger" title="remove">✕</button></form></td>
+{{ csrf_field }}
+          </tr>
+        {% endfor %}
+      </table>
+
+      <div class="totalrow"><span>Cart total</span><span class="grand">{{ goods_total | money }}</span></div>
+      {% if pays %}
+        <div class="payrow"><span>Paid</span><span>{{ paid | money }}</span></div>
+        {% if balance > 0 %}
+          <div class="payrow due"><span>Balance due</span><span>{{ balance | money }}</span></div>
+        {% elif change > 0 %}
+          <div class="payrow okrow"><span>Change back</span><span>{{ change | money }}</span></div>
+        {% endif %}
+      {% endif %}
+
+      {% if short or cart_errors %}
+        <div class="shortrow">
+          {% for err in cart_errors %}<div class="serr">{{ err }}</div>{% endfor %}
+          {% for sh in short.values() %}
+            <div><span class="oosbadge">out of stock</span> {{ sh['name'] }} - cart needs {{ sh['need'] }}, only {{ sh['stock'] }} left. Swap or remove it to sell.</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <input type="checkbox" id="pay-modal" class="modal-toggle" {% if open_pay %}checked{% endif %}>
+      <div class="paybar no-print">
+        {% if short or cart_errors %}
+          <span class="btn big off" title="Out of stock items in the cart">Out of stock - cannot sell</span>
+        {% else %}
+          <label for="pay-modal" class="btn big">Proceed with payment</label>
+        {% endif %}
+        <form method="post" action="{{ url_for('pos_clear', q=q or None, cat=cat or None) }}" class="inline fx">
+{{ csrf_field }}
+          <button class="btn ghost">Clear cart</button>
+        </form>
+      </div>
+
+      <div class="modal-backdrop">
+        <div class="modal">
+          <div class="modal-head">
+            <h2>Payment</h2>
+            <label for="pay-modal" class="modal-x" title="Close">✕</label>
+          </div>
+
+          <table class="pays" id="pay-lines"{% if not pays %} hidden{% endif %}>
+              <tr><th>Method</th><th class="num">Amount</th><th></th></tr>
+              {% for pay in pays %}
+                <tr>
+                  <td>{{ PAY_METHODS.get(pay['method'], pay['method']) }}
+                    {% if pay.get('note') %}<div class="paynote">{{ pay['note'] }}</div>{% endif %}
+                    {% if pay['method'] in NOTE_KEYS and not pay.get('note') %}<div class="paynote miss">note missing</div>{% endif %}</td>
+                  <td class="num">{{ pay['amount'] | money }}</td>
+                  <td class="num">
+                    <form method="post" action="{{ url_for('pos_pay_remove', idx=loop.index0, open=1, q=q or None, cat=cat or None) }}" class="inline fx">
+{{ csrf_field }}
+                      <button class="btn tiny danger" data-api="{{ url_for('pos_api_pay_remove', idx=loop.index0) }}" title="remove line">✕</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </table>
+          <p class="muted small" id="pay-empty"{% if pays %} hidden{% endif %}>Split the total across payment methods.</p>
+
+          <form method="post" action="{{ url_for('pos_pay', open=1, q=q or None, cat=cat or None) }}" class="payform" id="pay-form">
+{{ csrf_field }}
+            <select name="method" id="pay-method">
+              {% for pm in pay_methods %}
+                <option value="{{ pm['key'] }}"{% if pm['requires_note'] %} data-note="1"{% endif %}>{{ pm['label'] }}</option>
+              {% endfor %}
+            </select>
+            <input name="amount" id="pay-amount" class="amount" type="text" inputmode="numeric"
+                   autocomplete="off" spellcheck="false" placeholder="Enter amount">
+            <input name="note" id="pay-note" class="paynote-input" type="text" autocomplete="off"
+                   maxlength="300" placeholder="Leasing app / provider (required)" hidden>
+            <button class="btn" data-api="{{ url_for('pos_api_pay') }}">Add payment</button>
+            <button class="btn ghost" formaction="{{ url_for('pos_pay_exact', open=1, q=q or None, cat=cat or None) }}"
+                   data-api="{{ url_for('pos_api_pay_exact') }}">Pay remaining</button>
+          </form>
+
+          <p class="flash error" id="pay-error" hidden></p>
+          <div class="payrow"><span>Goods</span><span id="t-goods">{{ goods_total | money }}</span></div>
+          <form method="post" action="{{ url_for('pos_vat') }}" class="vatform{% if vat %} on{% endif %}" id="vat-form">
+{{ csrf_field }}
+            <label class="payrow vatrow">
+              <span class="vatbox"><input type="checkbox" name="vat" value="1" {% if vat %}checked{% endif %}> VAT {{ VAT_PERCENT | round | int }}%</span>
+              <span id="t-vat">{% if vat %}{{ vat | money }}{% endif %}</span>
+            </label>
+          </form>
+          <div class="payrow"><span>Total</span><span class="grand" id="t-total">{{ total | money }}</span></div>
+          <div class="payrow"{% if paid <= 0 %} hidden{% endif %}><span>Paid</span><span id="t-paid">{{ paid | money }}</span></div>
+          <div class="payrow due"{% if balance <= 0 %} hidden{% endif %}><span>Balance due</span><span id="t-balance">{{ balance | money }}</span></div>
+          <div class="payrow okrow"{% if change <= 0 %} hidden{% endif %}><span>Change back</span><span id="t-change">{{ change | money }}</span></div>
+
+          <div class="modal-foot">
+            <form method="post" action="{{ url_for('pos_checkout') }}" class="custform" id="cust-form">
+{{ csrf_field }}
+              <div class="custrow">
+                <input name="customer_phone" id="cust-phone" class="custphone" type="tel" inputmode="tel"
+                       autocomplete="off" spellcheck="false" maxlength="20" placeholder="Customer phone"
+                       value="{{ customer.phone or '' }}">
+                <input name="customer_note" id="cust-note" type="text" autocomplete="off"
+                       maxlength="300" placeholder="Note (optional)" value="{{ customer.note or '' }}">
+              </div>
+              <button class="btn big" {% if balance > 0 or not pays %}disabled{% endif %}>Complete sale</button>
+            </form>
+            <label for="pay-modal" class="btn ghost">Back to cart</label>
+          </div>
+        </div>
+      </div>
+
+      <h2>Held carts</h2>
+      <form method="post" action="{{ url_for('pos_hold', q=q or None, cat=cat or None) }}" class="payform fx">
+{{ csrf_field }}
+        <input name="label" placeholder="Label (customer, till...)" autocomplete="off">
+        <button class="btn ghost">Hold cart</button>
+      </form>
+      {% if held %}
+        <table class="pays">
+          <tr><th>Label</th><th>When</th><th></th></tr>
+          {% for h in held %}
+            <tr>
+              <td>{{ h['label'] }}</td>
+              <td class="small muted">{{ h['created_at'] }}</td>
+              <td class="num">
+                <form method="post" action="{{ url_for('pos_hold_resume', hid=h['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny ghost">Resume</button></form>
+{{ csrf_field }}
+                <form method="post" action="{{ url_for('pos_hold_delete', hid=h['id'], q=q or None, cat=cat or None) }}" class="inline fx"><button class="btn tiny danger">Delete</button></form>
+{{ csrf_field }}
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% else %}
+        <p class="muted small">No held carts.</p>
+      {% endif %}
+    {% else %}
+      <p class="muted">Cart is empty - tap a product or scan a barcode.</p>
+      {% if held %}
+        <h2>Held carts</h2>
+        <table class="pays">
+          <tr><th>Label</th><th>When</th><th></th></tr>
+          {% for h in held %}
+            <tr>
+              <td>{{ h['label'] }}</td>
+              <td class="small muted">{{ h['created_at'] }}</td>
+              <td class="num">
+                <form method="post" action="{{ url_for('pos_hold_resume', hid=h['id']) }}" class="inline fx"><button class="btn tiny ghost">Resume</button></form>
+{{ csrf_field }}
+                <form method="post" action="{{ url_for('pos_hold_delete', hid=h['id']) }}" class="inline fx"><button class="btn tiny danger">Delete</button></form>
+{{ csrf_field }}
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% endif %}
+    {% endif %}

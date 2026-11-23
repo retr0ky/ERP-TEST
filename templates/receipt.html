@@ -10,6 +10,7 @@
       <a class="btn ghost" href="{{ url_for('pos') }}">New sale</a>
       <form method="post" action="{{ url_for('sale_void', sale_id=sale['id']) }}" class="inline"
             data-confirm="1">
+{{ csrf_field }}
         <button class="btn danger">Void sale</button>
       </form>
     </div>

@@ -1,5 +1,7 @@
 import json, sqlite3, sys
-sys.path.insert(0, "/home/inthearmsofdevastation/Desktop/ERP")
+import os
+os.environ["TURSO_URL"] = ""
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 import app as A
 
 fails = []
@@ -13,6 +15,14 @@ def search(q, **kw):
     return r.get_json()
 
 c = A.app.test_client()
+with c.session_transaction() as _s:
+    _s["csrf"] = "testtoken"
+_post = c.post
+def _post2(url, data=None, **kw):
+    h = dict(kw.pop("headers", None) or {})
+    h["X-CSRF-Token"] = "testtoken"
+    return _post(url, data=data, headers=h, **kw)
+c.post = _post2
 
 # --- POS autocomplete: multi-word, any order, case-insensitive (incl. Cyrillic)
 hits = [p["name"] for p in search("rtx 5060")]

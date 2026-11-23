@@ -1,5 +1,7 @@
 import re, sqlite3, sys
-sys.path.insert(0, "/home/inthearmsofdevastation/Desktop/ERP")
+import os
+os.environ["TURSO_URL"] = ""
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 import app as A
 
 DB = A.DB_PATH
@@ -10,6 +12,14 @@ def chk(cond, label, extra=""):
         fails.append(label)
 
 c = A.app.test_client()
+with c.session_transaction() as _s:
+    _s["csrf"] = "testtoken"
+_post = c.post
+def _post2(url, data=None, **kw):
+    h = dict(kw.pop("headers", None) or {})
+    h["X-CSRF-Token"] = "testtoken"
+    return _post(url, data=data, headers=h, **kw)
+c.post = _post2
 
 # 1. pick a product with stock (pay modal only renders when the cart is not empty)
 conn = A.connect()
