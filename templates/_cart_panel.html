@@ -166,7 +166,7 @@
         <button class="btn ghost">Hold cart</button>
       </form>
       {% if held %}
-        <table class="pays">
+        <table class="pays held">
           <tr><th>Label</th><th>When</th><th></th></tr>
           {% for h in held %}
             <tr>
@@ -188,7 +188,7 @@
       <p class="muted">Cart is empty - tap a product or scan a barcode.</p>
       {% if held %}
         <h2>Held carts</h2>
-        <table class="pays">
+        <table class="pays held">
           <tr><th>Label</th><th>When</th><th></th></tr>
           {% for h in held %}
             <tr>

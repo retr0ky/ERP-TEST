@@ -311,6 +311,11 @@ button:disabled, .btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: 
 .sug { transition: none; }
 .prod:active { transform: translateY(1px) scale(.97); transition-duration: .16s; }
 .pays td, .pays th { font-size: .88rem; }
+/* Held carts: drop the frames-around-frames. No table outline, no header band,
+   no row rules - the only boxes left are the rounded Resume / Delete buttons. */
+.pays.held { border: none; background: none; box-shadow: none; }
+.pays.held th { background: none; border-bottom: none; color: var(--muted); font-size: .74rem; }
+.pays.held td { border-bottom: none; }
 .payform { display: flex; gap: .45rem; align-items: center; flex-wrap: wrap; margin: .8rem 0 .2rem; }
 .payform select { min-width: 140px; }
 .payform select, .payform input { transition: transform .44s cubic-bezier(.22,1,.36,1), border-color .44s, background .44s; }
