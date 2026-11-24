@@ -120,12 +120,30 @@ a:hover { text-decoration: underline; }
 }
 .badge.admin { color: var(--on-accent); background: linear-gradient(135deg, var(--red), var(--red-deep)); border-color: transparent; }
 .badge.cashier { color: var(--amber); background: rgba(var(--amber-rgb), .12); }
-.actcell { display: grid; gap: .45rem; }
-.actcell select { width: 7.5rem; }
-.actcell input[type="password"] { width: 9.5rem; }
-.newacct { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin-top: 1.5rem; }
-.newacct h2, .newacct p { flex: 1 0 100%; margin: 0 0 .2rem; }
-.newacct p { margin: 0; }
+/* ---- Accounts: same control metrics as the inventory acts grid (27px) ---- */
+.accounts .w-accuser { width: 138px; }
+.accounts .w-accrole { width: 78px; }
+.accounts .w-accactive { width: 74px; }
+.accounts .w-acclast { width: 142px; }
+.accounts .w-acacts { width: 300px; }
+.accounts th.acts { text-align: left; }
+.actcell { display: grid; gap: .35rem; }
+.actrow { display: flex; align-items: center; gap: .35rem; min-width: 0; }
+.inv td.acts form.inline.actrow { display: flex; }
+.actcell select, .actcell input[type="password"] {
+  flex: 1 1 auto; min-width: 0; height: 27px; padding: .26rem .45rem;
+  font-size: .74rem; border-radius: 7px;
+}
+.actcell .btn.tiny {
+  flex: 0 0 auto; height: 27px; padding: .26rem .55rem; font-size: .74rem; white-space: nowrap;
+}
+.actcell div.actrow form { flex: 1 1 0; min-width: 0; }
+.actcell div.actrow .btn.tiny { width: 100%; }
+.newacct.form { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-top: 1.5rem; }
+.newacct.form h2, .newacct.form p { grid-column: 1 / -1; }
+.newacct.form h2 { margin: 0 0 .25rem; }
+.newacct.form p { margin: 0; }
+.newacct.form .btn { justify-self: start; align-self: end; height: 38px; }
 nav { display: flex; gap: .4rem; flex-wrap: wrap; }
 nav a { color: var(--muted); padding: .35rem .75rem; border-radius: 9px; border: 1px solid transparent; transition: transform .30s cubic-bezier(.2,.8,.2,1), color .30s, border-color .30s, box-shadow .30s; }
 nav a:hover { color: var(--text); text-decoration: none; border-color: var(--line2); transform: translateY(-1px); }

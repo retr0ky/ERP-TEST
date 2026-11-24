@@ -4,8 +4,8 @@
 <h1>Accounts</h1>
 <p class="muted small">Admin = full power. Cashier = sell, stock in, add new products, view everything.</p>
 
-<table class="inv">
-  <tr><th>Username</th><th>Role</th><th>Active</th><th>Last login</th><th class="acts w-acacts">Actions</th></tr>
+<table class="inv accounts">
+  <tr><th class="w-accuser">Username</th><th class="w-accrole">Role</th><th class="w-accactive">Active</th><th class="w-acclast">Last login</th><th class="acts w-acacts">Actions</th></tr>
   {% for u in users %}
     <tr>
       <td class="name"><strong>{{ u['username'] }}</strong>{% if u['id'] == me['id'] %} <span class="muted small">(you)</span>{% endif %}</td>
