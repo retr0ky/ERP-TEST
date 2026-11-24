@@ -135,6 +135,10 @@ def seed_users(conn):
         password = secrets.token_urlsafe(9)
     conn.execute("INSERT INTO users (username, pass_hash, role) VALUES (?, ?, 'admin')",
                  (name, generate_password_hash(password)))
+    conn.commit()
+    app.logger.info("seeded admin account '%s' from %s", name,
+                    "ERP_ADMIN_PASSWORD" if os.environ.get("ERP_ADMIN_PASSWORD")
+                    else "ERP_PASSWORD" if PASSWORD else "a generated password")
     if generated:
         app.logger.warning("created admin account '%s' with password '%s' - "
                            "log in and change it under Accounts.", name, password)
@@ -881,9 +885,11 @@ def init_db(conn=None):
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     marker = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     if marker is not None and marker["value"] == SCHEMA_VERSION:
+        seed_users(conn)             # cheap SELECT; re-seeds if the table is somehow empty
+        conn.commit()
         if own:
             conn.close()
-        return                       # already built: 2 round trips instead of ~30
+        return                       # already built: 4 round trips instead of ~30
     conn.executescript(SCHEMA)
     conn.execute("INSERT OR IGNORE INTO stock_guards (id) VALUES (1)")
     add_columns(conn, "products", PRODUCT_COLUMNS)
