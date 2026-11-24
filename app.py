@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, session, url_for
@@ -56,6 +57,59 @@ app.secret_key = os.environ.get("ERP_SECRET_KEY") or secrets.token_hex(32)
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                   SESSION_COOKIE_SECURE=PUBLIC)
 
+CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; "
+       "base-uri 'self'; object-src 'none'")
+
+
+@app.after_request
+def security_headers(resp):
+    """The templates use inline script and inline style, so 'unsafe-inline' stays -
+    but nothing here may reach off-box, frame itself, or be sniffed as another type."""
+    resp.headers.setdefault("Content-Security-Policy", CSP)
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    return resp
+
+
+def wants_json():
+    """True when the caller is fetch(), not a browser navigating."""
+    return (request.headers.get("X-FX") == "1"
+            or request.headers.get("X-Requested-With") == "xhr"
+            or (request.headers.get("Accept") or "").startswith("application/json"))
+
+
+# ------------------------------------------------------- login rate limiting
+LOGIN_MAX_FAILS = int(os.environ.get("ERP_LOGIN_MAX_FAILS") or 5)
+LOGIN_WINDOW = int(os.environ.get("ERP_LOGIN_WINDOW") or 300)
+LOGIN_LOCK_BASE = int(os.environ.get("ERP_LOGIN_LOCK_SECONDS") or 30)
+LOGIN_LOCKS = {}          # remote addr -> (fails, window_started, locked_until)
+
+
+def login_lockout(ip):
+    """Seconds left on a lockout, or None when the caller may try."""
+    fails, started, locked = LOGIN_LOCKS.get(ip, (0, 0.0, 0.0))
+    now = time.time()
+    if locked and now < locked:
+        return int(locked - now) + 1
+    if fails and now - started > LOGIN_WINDOW:
+        LOGIN_LOCKS[ip] = (0, now, 0.0)
+    return None
+
+
+def login_failed(ip):
+    fails, started, _ = LOGIN_LOCKS.get(ip, (0, 0.0, 0.0))
+    now = time.time()
+    if now - started > LOGIN_WINDOW:
+        fails, started = 0, now
+    fails += 1
+    locked = now + LOGIN_LOCK_BASE * 2 ** (fails - LOGIN_MAX_FAILS) if fails >= LOGIN_MAX_FAILS else 0.0
+    LOGIN_LOCKS[ip] = (fails, started, locked)
+    app.logger.warning("failed login from %s (attempt %d in %ds window)", ip, fails, LOGIN_WINDOW)
+    return locked
+
 
 @app.before_request
 def login_gate():
@@ -71,10 +125,18 @@ def login_gate():
 def login():
     nxt = request.args.get("nxt") or url_for("pos")
     if request.method == "POST":
+        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
+        left = login_lockout(ip)
+        if left:
+            app.logger.warning("login throttled for %s - %ds left", ip, left)
+            flash(f"Too many wrong passwords. Try again in {left}s.", "error")
+            return render_template("login.html", nxt=nxt), 429
         if PASSWORD and hmac.compare_digest(request.form.get("password", ""), PASSWORD):
+            LOGIN_LOCKS.pop(ip, None)
             session["authed"] = True
             session["cart"] = session.get("cart", {})
             return redirect(nxt)
+        login_failed(ip)
         flash("Wrong password.", "error")
     return render_template("login.html", nxt=nxt)
 
@@ -90,7 +152,8 @@ def logout():
 ADMIN_PASSWORD = os.environ.get("ERP_ADMIN_PASSWORD") or ""
 ADMIN_WINDOW = int(os.environ.get("ERP_ADMIN_WINDOW") or 900)
 MAX_CART_LINES = int(os.environ.get("ERP_MAX_CART_LINES") or 60)
-import time
+MAX_QTY_PER_LINE = int(os.environ.get("ERP_MAX_QTY_PER_LINE") or 999)
+HELD_SCHEMA = 1        # bump when the held-cart blob layout changes; resume refuses mismatches
 
 
 ADMIN_ONLY = {"product_adjust", "product_delete", "product_purge", "product_restore",
@@ -105,7 +168,10 @@ def csrf_gate():
         return None
     sent = request.form.get("csrf") or request.headers.get("X-CSRF-Token") or ""
     if not hmac.compare_digest(sent, session.get("csrf", "")):
-        return render_template("error.html", msg="Session expired - reload the page and try again."), 400
+        msg = "Session expired - reload the page and try again."
+        if wants_json():
+            return jsonify(ok=False, error=msg), 400
+        return render_template("error.html", msg=msg), 400
     if request.endpoint in ADMIN_ONLY:
         return admin_gate()
 
@@ -125,6 +191,10 @@ def admin_gate():
     if sent and hmac.compare_digest(sent, ADMIN_PASSWORD):
         session["admin_until"] = time.time() + ADMIN_WINDOW
         return None
+    msg = "Admin PIN required for this action."
+    if wants_json():
+        # API / fetch callers must get JSON - a PIN form in an AJAX response is a parse error.
+        return jsonify(ok=False, error=msg, code="ADMIN_REQUIRED"), 401
     return render_template("admin_pin.html", form=dict(request.form),
                            back=request.path, admin_window=ADMIN_WINDOW), 401
 
@@ -401,8 +471,24 @@ def as_sqlite_error(exc):
     return exc
 
 
+SAFE_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def ident(name):
+    """Table / column name veto. sqllit() quotes values; it says nothing about
+    identifiers, so anything built from a dynamic name has to pass here first."""
+    name = str(name)
+    if not SAFE_IDENT.match(name):
+        raise ValueError(f"refusing unsafe SQL identifier: {name!r}")
+    return name
+
+
 def sqllit(value):
-    """Safe SQL literal - names, notes and amounts go into a script as literals."""
+    """Safe SQL literal - names, notes and amounts go into a script as literals.
+
+    Values only - numbers print through int()/repr(), strings get quoted and
+    escaped. Never point it at a table or column name; use ident() for those.
+    """
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -446,14 +532,32 @@ class DB:
         self._guard(self._c.executescript, sql)
 
     def script(self, statements):
-        """One round trip, one transaction: the whole checkout travels together.
+        """One transaction: the whole checkout travels together.
+
+        A statement is plain SQL or a (sql, params) pair - and when params is a list
+        of pairs it becomes one executemany, so a 12-line cart is a handful of round
+        trips instead of a hundred. Values are bound, never formatted into SQL.
 
         A failing statement (a stock guard, a unique clash) aborts every statement
         in the script, so no half-written sale can survive.
         """
-        self.executescript("BEGIN IMMEDIATE;\n"
-                           + ";\n".join(st.strip().rstrip(";") for st in statements)
-                           + ";\nCOMMIT;")
+        nested = bool(getattr(self._c, "in_transaction", False))
+        if not nested:
+            self.execute("BEGIN IMMEDIATE")
+        try:
+            for st in statements:
+                if isinstance(st, tuple):
+                    sql, params = st
+                    batch = isinstance(params, list) and all(isinstance(p, tuple) for p in params)
+                    self.executemany(sql, params) if batch else self.execute(sql, tuple(params))
+                else:
+                    self.execute(st)
+        except Exception:
+            if not nested:
+                self.rollback()
+            raise
+        if not nested:
+            self.commit()
 
     def commit(self):
         self._guard(self._c.commit)
@@ -656,15 +760,24 @@ def pay_totals(conn, pays, goods_total):
 
 
 def category_rows():
-    return db().execute("""SELECT c.*, COUNT(p.id) AS product_count FROM categories c
-                           LEFT JOIN products p ON p.category_id = c.id AND p.active = 1
-                           GROUP BY c.id ORDER BY c.name""").fetchall()
+    """Once per request - several views in the same request want the same chips."""
+    cached = getattr(g, "_category_rows", None)
+    if cached is None:
+        cached = db().execute("""SELECT c.*, COUNT(p.id) AS product_count FROM categories c
+                                LEFT JOIN products p ON p.category_id = c.id AND p.active = 1
+                                GROUP BY c.id ORDER BY c.name""").fetchall()
+        g._category_rows = cached
+    return cached
 
 
 def supplier_rows():
-    return db().execute("""SELECT s.*, COUNT(p.id) AS product_count FROM suppliers s
-                           LEFT JOIN products p ON p.supplier_id = s.id AND p.active = 1
-                           GROUP BY s.id ORDER BY s.name""").fetchall()
+    cached = getattr(g, "_supplier_rows", None)
+    if cached is None:
+        cached = db().execute("""SELECT s.*, COUNT(p.id) AS product_count FROM suppliers s
+                                LEFT JOIN products p ON p.supplier_id = s.id AND p.active = 1
+                                GROUP BY s.id ORDER BY s.name""").fetchall()
+        g._supplier_rows = cached
+    return cached
 
 
 def to_int(value):
@@ -1152,11 +1265,9 @@ def cart_context():
 
 
 def cart_partial():
-    # The wrapper carries the mount id: erpFx swaps outerHTML, so the fragment has to
-    # re-supply #cart-panel or the second cart action would have nothing to replace.
-    return ('<div id="cart-panel">'
-            + render_template("_cart_panel.html", **cart_context())
-            + '</div>')
+    # _cart_panel.html carries its own #cart-panel wrapper, so the fragment is exactly
+    # one element and erpFx can swap outerHTML without a wrapper to unwrap.
+    return render_template("_cart_panel.html", **cart_context())
 
 
 def pos_redirect(include_open=False):
@@ -1179,15 +1290,23 @@ def pos_redirect(include_open=False):
 def cart_entries():
     cart = session.get("cart", {})
     entries = []
+    clean = {}
     conn = db()
     for pid, qty in cart.items():
+        pid_i, qty_i = to_int(pid), to_int(qty)
+        if pid_i is None or qty_i is None or qty_i <= 0:
+            continue                                  # junk written into the session
+        qty_i = min(qty_i, MAX_QTY_PER_LINE)
+        clean[str(pid_i)] = qty_i
         p = conn.execute("SELECT * FROM products WHERE id = ? AND active = 1",
-                         (int(pid),)).fetchone()
-        if p is None or qty <= 0:
-            continue
+                         (pid_i,)).fetchone()
+        if p is None:
+            continue                                  # deleted or retired since it was added
         row = dict(p)
         row["qty"] = max(0, row["qty"])
-        entries.append((row, qty))
+        entries.append((row, qty_i))
+    if clean != cart:
+        session["cart"] = clean
     entries.sort(key=lambda e: e[0]["name"])
     total = round(sum(p["price"] * q for p, q in entries), 2)
     return entries, total
@@ -1608,7 +1727,9 @@ def pos_hold():
         flash("Nothing to hold - cart is empty.", "error")
         return pos_redirect()
     label = (request.form.get("label") or "").strip() or "Held cart"
-    data = json.dumps({"cart": cart, "sets": cart_sets, "payments": pays})
+    # v travels with the blob: a held cart written by an older build is recognisable
+    # at resume time instead of being merged into a cart shaped differently.
+    data = json.dumps({"v": HELD_SCHEMA, "cart": cart, "sets": cart_sets, "payments": pays})
     db().execute("INSERT INTO held_carts (label, data) VALUES (?, ?)", (label, data))
     db().commit()
     session["cart"] = {}
@@ -1628,12 +1749,23 @@ def pos_hold_resume(hid):
         data = json.loads(row["data"])
     except (TypeError, ValueError):
         data = {}
+    if not isinstance(data, dict) or data.get("v", HELD_SCHEMA) != HELD_SCHEMA:
+        # A blob from another build is left where it is rather than half-merged.
+        flash(f"Held cart '{row['label']}' was written by an older version "
+              f"(v{data.get('v', 'unset')}) - delete it and rebuild the cart.", "error")
+        return pos_redirect()
     cart = session.get("cart", {})
     for pid, qty in (data.get("cart") or {}).items():
-        cart[str(pid)] = cart.get(str(pid), 0) + int(qty)
+        pid_i, qty_i = to_int(pid), to_int(qty)
+        if pid_i is None or not qty_i:
+            continue
+        cart[str(pid_i)] = min(cart.get(str(pid_i), 0) + qty_i, MAX_QTY_PER_LINE)
     cart_sets = session.get("sets", {})
     for sid, qty in (data.get("sets") or {}).items():
-        cart_sets[str(sid)] = cart_sets.get(str(sid), 0) + int(qty)
+        sid_i, qty_i = to_int(sid), to_int(qty)
+        if sid_i is None or not qty_i:
+            continue
+        cart_sets[str(sid_i)] = min(cart_sets.get(str(sid_i), 0) + qty_i, MAX_QTY_PER_LINE)
     session["cart"] = cart
     session["sets"] = cart_sets
     session["payments"] = payment_lines() + list(data.get("payments") or [])
@@ -1677,12 +1809,15 @@ def note_of(pm, raw):
     return clean_pay_note(raw) if note_required(pm) else ""
 
 
+AMOUNT_RE = re.compile(r"(?:\d+|\d*\.\d{1,2})\Z")
+
+
 def parse_amount(raw):
+    """Digits with at most one decimal point - '1.2.3' and '12,,000' are rejected, not bent."""
     raw = (raw or "").strip().replace(",", "").replace(CURRENCY, "")
-    try:
-        return float(raw)
-    except ValueError:
+    if not AMOUNT_RE.match(raw):
         return None
+    return float(raw)
 
 
 @app.route("/pos/pay", methods=["POST"])
@@ -1835,6 +1970,24 @@ def pos_api_pay_remove(idx):
     return jsonify(pay_state(pays, goods_total))
 
 
+def sold_out_culprit(conn, need, entries, cart_sets):
+    """Name the line stock ran out from - the guard only says 'no'."""
+    names = {p["id"]: p["name"] for p, _ in entries}
+    for s, _ in cart_sets:
+        for c in s["components"]:
+            names.setdefault(c["id"], c["name"])
+    ids = list(need)
+    if not ids:
+        return "an item"
+    slots = ", ".join(["?"] * len(ids))
+    stock = {r["id"]: r["qty"] for r in conn.execute(
+        f"SELECT id, qty FROM products WHERE id IN ({slots})", tuple(ids)).fetchall()}
+    for pid, qty in need.items():
+        if stock.get(pid, -1) < qty:
+            return names.get(pid, f"item {pid}")
+    return "an item"
+
+
 @app.route("/pos/checkout", methods=["POST"])
 def pos_checkout():
     entries, goods_total = cart_entries()
@@ -1886,56 +2039,56 @@ def pos_checkout():
     # Sale id is chosen up front so the whole sale can travel in one script.
     sale_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM sales").fetchone()[0]
     ref = f"SALE-{sale_id:05d}"
+    # Every value below travels as a bound parameter. Nothing is formatted into SQL text.
+    need_lines = list(need.items())
+    who = actor()
     stmts = []
-    for pid, qty in need.items():
-        # Guard: fires only when stock cannot cover the sale -> aborts the script.
-        stmts.append("INSERT INTO stock_guards (id) SELECT 1 WHERE"
-                     " COALESCE((SELECT qty FROM products WHERE id = %d), -1) < %d" % (pid, qty))
-    stmts.append("""INSERT INTO sales (id, ref, total, paid, change, item_count, vat_amount,
-                                      customer_phone, customer_note, n_search)
-                    VALUES (%d, %s, %s, %s, %s, %d, %s, %s, %s, %s)"""
-                 % (sale_id, sqllit(ref), sqllit(total), sqllit(paid),
-                    sqllit(max(paid - total, 0)), item_count, sqllit(vat),
-                    sqllit(cust_phone or None), sqllit(cust_note or None),
-                    sqllit(blob_of(ref, cust_phone, cust_note))))
-    for p, qty in entries:
-        stmts.append("""INSERT INTO sale_items (sale_id, product_id, name, price, qty, line_total, n_name)
-                        VALUES (%d, %d, %s, %s, %d, %s, %s)"""
-                     % (sale_id, p["id"], sqllit(p["name"]), sqllit(p["price"]), qty,
-                        sqllit(p["price"] * qty), sqllit(norm(p["name"]))))
-    for s, qty in cart_sets:
-        stmts.append("""INSERT INTO sale_items (sale_id, product_id, set_id, name, price, qty, line_total, n_name)
-                        VALUES (%d, NULL, %d, %s, %s, %d, %s, %s)"""
-                     % (sale_id, s["id"], sqllit(s["name"]), sqllit(s["unit_price"]),
-                        qty, sqllit(s["unit_price"] * qty), sqllit(norm(s["name"]))))
-    who = sqllit(actor())
-    for pid, qty in need.items():
-        stmts.append("""INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
-                        SELECT id, qty, qty - %d, -%d, 'sale', %s, %d FROM products WHERE id = %d"""
-                     % (qty, qty, who, sale_id, pid))
-        stmts.append("UPDATE products SET qty = qty - %d WHERE id = %d AND qty >= %d"
-                     % (qty, pid, qty))
+    if need_lines:
+        # One guard for the whole cart: it inserts a duplicate primary key the moment any
+        # line cannot be covered by stock, which aborts the whole transaction.
+        stmts.append((
+            "WITH need(pid, qty) AS (VALUES " + ", ".join("(?, ?)" for _ in need_lines) + ") "
+            "INSERT INTO stock_guards (id) SELECT 1 FROM need "
+            "WHERE COALESCE((SELECT qty FROM products WHERE id = need.pid), -1) < need.qty",
+            [v for pid, qty in need_lines for v in (pid, qty)]))
+    stmts.append(("""INSERT INTO sales (id, ref, total, paid, change, item_count, vat_amount,
+                                        customer_phone, customer_note, n_search)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (sale_id, ref, total, paid, max(paid - total, 0), item_count, vat,
+                   cust_phone or None, cust_note or None, blob_of(ref, cust_phone, cust_note))))
+    stmts.append(("""INSERT INTO sale_items (sale_id, product_id, name, price, qty, line_total, n_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                  [(sale_id, p["id"], p["name"], p["price"], qty,
+                    round(p["price"] * qty, 2), norm(p["name"])) for p, qty in entries]))
+    if cart_sets:
+        stmts.append(("""INSERT INTO sale_items (sale_id, product_id, set_id, name, price, qty,
+                                                 line_total, n_name)
+                        VALUES (?, NULL, ?, ?, ?, ?, ?, ?)""",
+                      [(sale_id, s["id"], s["name"], s["unit_price"], qty,
+                        round(s["unit_price"] * qty, 2), norm(s["name"])) for s, qty in cart_sets]))
+    stmts.append(("""INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
+                    SELECT id, qty, qty - ?, ?, 'sale', ?, ? FROM products WHERE id = ?""",
+                  [(qty, -qty, who, sale_id, pid) for pid, qty in need_lines]))
+    stmts.append(("UPDATE products SET qty = qty - ? WHERE id = ? AND qty >= ?",
+                  [(qty, pid, qty) for pid, qty in need_lines]))
+    pay_rows = []
     for pay in pays:
         pm = pm_map.get(pay["method"]) or {}
         note = clean_pay_note(pay.get("note"))
-        stmts.append("""INSERT INTO payments (sale_id, method, amount, commission_percent,
-                                             commission_mode, commission_amount, note, n_note)
-                        VALUES (%d, %s, %s, %s, %s, %s, %s, %s)"""
-                     % (sale_id, sqllit(pay["method"]), sqllit(pay["amount"]),
-                        sqllit(pm.get("commission_percent") or 0), sqllit(pm.get("commission_mode")),
-                        sqllit(absorbed_of(pm, pay["amount"]) + surcharge_of(pm, pay["amount"])),
-                        sqllit(note or None), sqllit(norm(note))))
+        pay_rows.append((sale_id, pay["method"], pay["amount"],
+                         pm.get("commission_percent") or 0, pm.get("commission_mode"),
+                         absorbed_of(pm, pay["amount"]) + surcharge_of(pm, pay["amount"]),
+                         note or None, norm(note)))
+    stmts.append(("""INSERT INTO payments (sale_id, method, amount, commission_percent,
+                                          commission_mode, commission_amount, note, n_note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", pay_rows))
     try:
         conn.script(stmts)
     except sqlite3.IntegrityError as exc:
         conn.rollback()
-        names = {p["id"]: p["name"] for p, _ in entries}
-        for s, _ in cart_sets:
-            for c in s["components"]:
-                names.setdefault(c["id"], c["name"])
-        flash(f"Cannot complete the sale: {names.get(pid, 'an item')} was just sold out "
-              f"by another session. The cart is untouched - re-check stock and try again.",
-              "error")
+        flash(f"Cannot complete the sale: {sold_out_culprit(db(), need, entries, cart_sets)} "
+              "was just sold out by another session. The cart is untouched - "
+              "re-check stock and try again.", "error")
         if not DEBUG_MODE:
             app.logger.warning("checkout aborted (sale %s): %s", ref, exc)
         return pos_redirect(True)

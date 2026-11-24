@@ -1,3 +1,4 @@
+<div id="cart-panel">
 {% with msgs = get_flashed_messages(with_categories=true) %}
 {% for kind, msg in msgs %}<div class="flash {{ kind }}">{{ msg }}</div>{% endfor %}
 {% endwith %}
@@ -204,3 +205,4 @@
         </table>
       {% endif %}
     {% endif %}
+</div>
