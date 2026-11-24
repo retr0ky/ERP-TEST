@@ -1,0 +1,28 @@
+{# Product table body - shared by /inventory and the /inventory/search fetch so the
+   live filter and the full page can never drift apart. #}
+      {% for p in products %}
+        <tr>
+          <td class="name" title="{{ p['name'] }}{% if p['model'] %} - {{ p['model'] }}{% endif %}">{{ p['name'] }}{% if p['model'] %} <span class="muted small">{{ p['model'] }}</span>{% endif %}</td>
+          <td class="muted">{{ p['category'] or '-' }}</td>
+          <td class="muted opt">{{ p['brand'] or '-' }}</td>
+          <td class="num">{{ p['cost'] | money }}</td>
+          <td class="num">{{ p['price'] | money }}</td>
+          <td class="num qty {{ 'bad' if p['qty'] == 0 }} {{ 'warn' if p['qty'] > 0 and p['qty'] <= p['low_stock_at'] }}">{{ p['qty'] }}</td>
+          <td class="muted">{{ p['supplier'] or '-' }}</td>
+          <td class="acts"><div class="acts-grid g4">
+            <form method="post" action="{{ url_for('pos_add', pid=p['id']) }}" class="inline">
+{{ csrf_field }}
+              <button class="btn tiny" title="Add to POS cart">+ POS</button>
+            </form>
+            <a class="btn tiny ghost" href="{{ url_for('product_adjust', pid=p['id']) }}">Stock</a>
+            {% if is_admin %}
+            <a class="btn tiny ghost" href="{{ url_for('product_edit', pid=p['id']) }}">Edit</a>
+            <form method="post" action="{{ url_for('product_delete', pid=p['id']) }}" class="inline"
+                  data-confirm="1">
+{{ csrf_field }}
+              <button class="btn tiny danger">Delete</button>
+            </form>
+            {% endif %}
+          </div></td>
+        </tr>
+      {% endfor %}

@@ -24,7 +24,7 @@
 {% if tab == 'products' %}
   <form method="get" class="invbar no-print">
     <input type="hidden" name="tab" value="products">
-    <input name="q" value="{{ q }}" placeholder="Search name, SKU, barcode or brand" autofocus>
+    <input id="inv-q" name="q" value="{{ q }}" placeholder="Search name, SKU, barcode or brand" autocomplete="off" spellcheck="false" autofocus>
     <select name="cat">
       <option value="">All categories</option>
       {% for c in categories %}
@@ -33,11 +33,12 @@
     </select>
     <label class="radio"><input type="checkbox" name="low" value="1" {{ 'checked' if low in ('1','on','yes') }}> Low stock only</label>
     <button class="btn ghost">Filter</button>
-    {% if q or cat_id or low in ('1','on','yes') %}<a class="btn ghost" href="{{ url_for('inventory') }}">Clear</a>{% endif %}
+    <a class="btn ghost" id="inv-clear" href="{{ url_for('inventory') }}"
+       {% if not (q or cat_id or low in ('1','on','yes')) %}hidden{% endif %}>Clear</a>
   </form>
 
-  {% if products %}
-    <table class="inv">
+  <div id="inv-results">
+    <table class="inv"{% if not products %} hidden{% endif %}>
       <tr>
         {{ h('name', 'Name', 'w-name') }}
         {{ h('category', 'Category', 'w-cat') }}
@@ -48,38 +49,14 @@
         {{ h('supplier', 'Supplier', 'w-sup') }}
         <th class="acts">Actions</th>
       </tr>
-      {% for p in products %}
-        <tr>
-          <td class="name" title="{{ p['name'] }}{% if p['model'] %} - {{ p['model'] }}{% endif %}">{{ p['name'] }}{% if p['model'] %} <span class="muted small">{{ p['model'] }}</span>{% endif %}</td>
-          <td class="muted">{{ p['category'] or '-' }}</td>
-          <td class="muted opt">{{ p['brand'] or '-' }}</td>
-          <td class="num">{{ p['cost'] | money }}</td>
-          <td class="num">{{ p['price'] | money }}</td>
-          <td class="num qty {{ 'bad' if p['qty'] == 0 }} {{ 'warn' if p['qty'] > 0 and p['qty'] <= p['low_stock_at'] }}">{{ p['qty'] }}</td>
-          <td class="muted">{{ p['supplier'] or '-' }}</td>
-          <td class="acts"><div class="acts-grid g4">
-            <form method="post" action="{{ url_for('pos_add', pid=p['id']) }}" class="inline">
-{{ csrf_field }}
-              <button class="btn tiny" title="Add to POS cart">+ POS</button>
-            </form>
-            <a class="btn tiny ghost" href="{{ url_for('product_adjust', pid=p['id']) }}">Stock</a>
-            {% if is_admin %}
-            <a class="btn tiny ghost" href="{{ url_for('product_edit', pid=p['id']) }}">Edit</a>
-            <form method="post" action="{{ url_for('product_delete', pid=p['id']) }}" class="inline"
-                  data-confirm="1">
-{{ csrf_field }}
-              <button class="btn tiny danger">Delete</button>
-            </form>
-            {% endif %}
-          </div></td>
-        </tr>
-      {% endfor %}
+      <tbody id="inv-rows">
+      {% include "_inv_rows.html" %}
+      </tbody>
     </table>
-    <p class="muted small">{{ products | length }} product(s){% if low_count %} - {{ low_count }} at or under reorder level{% endif %}.</p>
-  {% else %}
-    <p class="muted">{% if q or cat_id or low in ('1','on','yes') %}No products match these filters.{% else %}No products yet - add your first one.{% endif %}</p>
-    <a class="btn" href="{{ url_for('product_new') }}">Add product</a>
-  {% endif %}
+    <p class="muted small" id="inv-note"{% if not products %} hidden{% endif %}>{{ products | length }} product(s){% if low_count %} - {{ low_count }} at or under reorder level{% endif %}.</p>
+    <p class="muted" id="inv-empty"{% if products %} hidden{% endif %}>{% if q or cat_id or low in ('1','on','yes') %}No products match these filters.{% else %}No products yet - add your first one.{% endif %}</p>
+    <a class="btn" id="inv-add" href="{{ url_for('product_new') }}"{% if products %} hidden{% endif %}>Add product</a>
+  </div>
 {% elif tab == 'sets' %}
   <div class="row no-print" style="margin:0 0 1rem">
     {% if is_admin %}<a class="btn" href="{{ url_for('set_new') }}">Create set</a>{% endif %}
@@ -220,6 +197,67 @@
         b.classList.remove('warn');
       }, 4000);
     }, true);
+  })();
+
+  /* Live filter, same shape as the POS search: a small JSON call that swaps the
+     table body only - no page reload, no URL rewrite, no back-button noise. */
+  (function () {
+    const input = document.getElementById('inv-q');
+    const body = document.getElementById('inv-rows');
+    if (!input || !body) return;
+    const form = input.closest('form');
+    const catSel = form && form.querySelector('select[name="cat"]');
+    const lowBox = form && form.querySelector('input[name="low"]');
+    const clearBtn = document.getElementById('inv-clear');
+    const table = body.closest('table');
+    const note = document.getElementById('inv-note');
+    const empty = document.getElementById('inv-empty');
+    const addBtn = document.getElementById('inv-add');
+    const api = {{ url_for('inventory_search') | tojson }};
+    const sort = {{ sort | tojson }}, sdir = {{ sdir | tojson }};
+    const CSRF = {{ csrf_token | tojson }};
+    let timer = null, seq = 0, last = null;
+
+    function query() {
+      const p = new URLSearchParams();
+      const q = input.value.trim();
+      if (q) p.set('q', q);
+      if (catSel && catSel.value) p.set('cat', catSel.value);
+      if (lowBox && lowBox.checked) p.set('low', '1');
+      p.set('sort', sort);
+      p.set('sdir', sdir);
+      return p;
+    }
+
+    async function run() {
+      const p = query();
+      const qs = p.toString();
+      if (qs === last) return;
+      const mine = ++seq;
+      try {
+        const r = await fetch(api + '?' + qs,
+                              { headers: { 'X-Requested-With': 'xhr', 'X-CSRF-Token': CSRF } });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (mine !== seq) return;
+        last = qs;
+        body.innerHTML = data.rows;
+        table.hidden = !data.count;
+        note.hidden = !data.count;
+        note.textContent = data.note + '.';
+        empty.hidden = !!data.count;
+        empty.textContent = data.empty;
+        if (addBtn) addBtn.hidden = !!data.count;
+        if (clearBtn) clearBtn.hidden = !(p.get('q') || p.get('cat') || p.get('low'));
+      } catch (err) { /* leave whatever is on screen */ }
+    }
+
+    input.addEventListener('input', function () {
+      clearTimeout(timer);
+      timer = setTimeout(run, 250);
+    });
+    if (catSel) catSel.addEventListener('change', run);
+    if (lowBox) lowBox.addEventListener('change', run);
   })();
   </script>
 

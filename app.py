@@ -1046,6 +1046,31 @@ def order_by(sort, sdir):
     return f"ORDER BY {expr} {sdir.upper()}, p.id"
 
 
+def product_rows(q, cat_id, low, sort, sdir):
+    """Active products matching the inventory filter bar, in the requested order."""
+    d = db()
+    where = "p.active = 1"
+    args = []
+    if q:
+        clause, extra = all_words(product_columns(), q)
+        if clause:
+            where += f" AND {clause}"
+            args += extra
+    if cat_id is not None:
+        where += " AND p.category_id = ?"
+        args.append(cat_id)
+
+    sql = """SELECT p.*, c.name AS category, s.name AS supplier
+             FROM products p
+             LEFT JOIN categories c ON c.id = p.category_id
+             LEFT JOIN suppliers s ON s.id = p.supplier_id
+             WHERE """ + where + " " + order_by(sort, sdir)
+    rows = [dict(r) for r in d.execute(sql, args).fetchall()]
+    if low in ("1", "on", "yes"):
+        rows = [r for r in rows if r["qty"] <= r["low_stock_at"]]
+    return rows, sum(1 for r in rows if r["qty"] <= r["low_stock_at"])
+
+
 @app.route("/inventory")
 def inventory():
     d = db()
@@ -1086,30 +1111,31 @@ def inventory():
     q = request.args.get("q", "").strip()
     cat_id = to_int(request.args.get("cat"))
     low = request.args.get("low", "")
-    where = "p.active = 1"
-    args = []
-    if q:
-        clause, extra = all_words(product_columns(), q)
-        if clause:
-            where += f" AND {clause}"
-            args += extra
-    if cat_id is not None:
-        where += " AND p.category_id = ?"
-        args.append(cat_id)
-
-    sql = """SELECT p.*, c.name AS category, s.name AS supplier
-             FROM products p
-             LEFT JOIN categories c ON c.id = p.category_id
-             LEFT JOIN suppliers s ON s.id = p.supplier_id
-             WHERE """ + where + " " + order_by(sort, sdir)
-    rows = [dict(r) for r in d.execute(sql, args).fetchall()]
-    if low in ("1", "on", "yes"):
-        rows = [r for r in rows if r["qty"] <= r["low_stock_at"]]
-    low_count = sum(1 for r in rows if r["qty"] <= r["low_stock_at"])
+    rows, low_count = product_rows(q, cat_id, low, sort, sdir)
 
     return render_template("inventory.html", tab="products", products=rows, q=q,
                            cat_id=cat_id, low=low, low_count=low_count,
                            categories=categories, sort=sort, sdir=sdir)
+
+
+@app.route("/inventory/search")
+def inventory_search():
+    """Live filter for the inventory bar: same rows as /inventory, but only the
+    table body, so typing never reloads the page or rewrites the URL."""
+    sort, sdir = sort_args()
+    q = request.args.get("q", "").strip()
+    cat_id = to_int(request.args.get("cat"))
+    low = request.args.get("low", "")
+    filtered = bool(q) or cat_id is not None or low in ("1", "on", "yes")
+    rows, low_count = product_rows(q, cat_id, low, sort, sdir)
+    return jsonify(
+        rows=render_template("_inv_rows.html", products=rows),
+        count=len(rows),
+        note=f"{len(rows)} product(s)"
+             + (f" - {low_count} at or under reorder level" if low_count else ""),
+        empty=("No products match these filters." if filtered
+               else "No products yet - add your first one."),
+    )
 
 
 @app.route("/inventory/deleted")
