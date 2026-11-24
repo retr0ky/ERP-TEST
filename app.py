@@ -227,7 +227,8 @@ HELD_SCHEMA = 1        # bump when the held-cart blob layout changes; resume ref
 
 ADMIN_ONLY = {"product_edit", "product_delete", "product_purge", "product_restore",
               "category_edit", "category_delete", "set_new", "set_edit", "set_delete",
-              "sale_void", "accounts", "account_new", "account_update", "account_toggle"}
+              "sale_void", "accounts", "account_new", "account_update", "account_toggle",
+              "account_delete", "logs"}
 
 @app.before_request
 def csrf_gate():
@@ -382,24 +383,40 @@ def account_toggle(uid):
     return redirect(url_for("accounts"))
 
 
-@app.route("/account", methods=["GET", "POST"])
-def account_self():
-    """Any logged-in user can change their own password."""
-    me = current_user()
-    if request.method == "POST":
-        row = db().execute("SELECT pass_hash FROM users WHERE id = ?", (me["id"],)).fetchone()
-        current = request.form.get("current_password") or ""
-        new = request.form.get("new_password") or ""
-        if not check_password_hash(row["pass_hash"], current):
-            flash("Current password is wrong.", "error")
-        elif len(new) < MIN_PASSWORD_LEN:
-            flash(f"New password needs at least {MIN_PASSWORD_LEN} characters.", "error")
-        else:
-            db().execute("UPDATE users SET pass_hash = ? WHERE id = ?",
-                         (generate_password_hash(new), me["id"]))
-            db().commit()
-            flash("Password changed.", "ok")
-    return render_template("account.html", me=me, min_len=MIN_PASSWORD_LEN)
+@app.route("/accounts/<int:uid>/delete", methods=["POST"])
+def account_delete(uid):
+    user = db().execute("SELECT id, username, role, active FROM users WHERE id = ?",
+                        (uid,)).fetchone()
+    if user is None:
+        flash("Account not found.", "error")
+        return redirect(url_for("accounts"))
+    if uid == session.get("uid"):
+        flash("You cannot delete your own account - disable it instead.", "error")
+        return redirect(url_for("accounts"))
+    if user["role"] == "admin" and user["active"] and is_last_active_admin(uid):
+        flash("Cannot delete the last active admin.", "error")
+        return redirect(url_for("accounts"))
+    db().execute("DELETE FROM users WHERE id = ?", (uid,))
+    db().commit()
+    flash(f"Account {user['username']} deleted.", "ok")
+    return redirect(url_for("accounts"))
+
+
+@app.route("/logs")
+def logs():
+    """Admin-only audit trail: every stock move - who did it, what changed, why."""
+    q = (request.args.get("q") or "").strip()
+    sql = ("SELECT l.id, l.created_at, l.actor, l.reason, l.old_qty, l.new_qty, l.delta,"
+           " COALESCE(p.name, '(deleted product)') AS name, l.sale_id"
+           " FROM inventory_logs l LEFT JOIN products p ON p.id = l.product_id")
+    args: list = []
+    if q:
+        sql += " WHERE p.name LIKE ? OR l.actor LIKE ? OR l.reason LIKE ?"
+        like = f"%{q}%"
+        args = [like, like, like]
+    sql += " ORDER BY l.id DESC LIMIT 300"
+    rows = db().execute(sql, args).fetchall()
+    return render_template("logs.html", rows=rows, q=q)
 
 
 @app.context_processor

@@ -2,6 +2,7 @@ ERP CHANGELOG (single file from 2026-11-24 onward)
 
 ==== 2026-11-24: User accounts + roles (admin / cashier) ====
 - New users table (schema v6) + first-run seed: one admin account. Password comes from
+- Follow-up: Accounts rows now have discrete buttons (Change role / Reset password / Disable-Enable / Delete, guards on self-delete and last admin); new admin-only /logs audit page (who/what/why per stock move, searchable); removed the confusing "admin" topbar link and self-service /account page - admins reset any password incl. their own on Accounts; login/logout user chip is plain text now.
   ERP_ADMIN_PASSWORD, else the old ERP_PASSWORD, else a generated one printed once at startup.
   Login is now username + password (hashed, werkzeug scrypt/pbkdf2); the single shared
   ERP_PASSWORD login is gone. Per-IP brute-force throttling unchanged.

@@ -140,14 +140,17 @@ chk(r.status_code == 200, "a disabled account cannot log in")
 post(admin, "/accounts/%d/toggle" % user_row("cash1")["id"])
 chk(user_row("cash1")["active"] == 1, "admin can re-enable it")
 
-# ------------------------------------------------------ 8. everyone changes own password
-cash, r = login("cash1", "cashpass")
-r = post(cash, "/account", {"current_password": "wrong", "new_password": "brandnew"})
+# ------------------------------- 8. admin reset / delete, logs page, guards
+r = post(admin, "/accounts/%d" % user_row("cash1")["id"], {"password": "brandnew"})
 _, r2 = login("cash1", "brandnew")
-chk(r.status_code == 200 and r2.status_code == 200, "wrong current password blocks the change")
-r = post(cash, "/account", {"current_password": "cashpass", "new_password": "brandnew"})
-_, r2 = login("cash1", "brandnew")
-chk(r2.status_code == 302, "correct current password allows the change")
+chk(r2.status_code == 302, "admin can reset a password")
+page = admin.get("/logs").get_data(as_text=True)
+chk(admin.get("/logs").status_code == 200 and "cash1" in page, "admin sees activity logs with actors")
+chk(cash.get("/logs").status_code == 401, "cashier cannot open Logs")
+r = post(admin, "/accounts/%d/delete" % admin_uid)
+chk(user_row("admin") is not None, "an admin cannot delete their own account")
+post(admin, "/accounts/%d/delete" % user_row("cash1")["id"])
+chk(user_row("cash1") is None, "admin can delete another account")
 
 # ----------------------------------------------------------- 9. open redirect refused
 r = A.app.test_client().get("/login", query_string={"nxt": "https://evil.example"})

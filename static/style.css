@@ -120,6 +120,12 @@ a:hover { text-decoration: underline; }
 }
 .badge.admin { color: var(--on-accent); background: linear-gradient(135deg, var(--red), var(--red-deep)); border-color: transparent; }
 .badge.cashier { color: var(--amber); background: rgba(var(--amber-rgb), .12); }
+.actcell { display: grid; gap: .45rem; }
+.actcell select { width: 7.5rem; }
+.actcell input[type="password"] { width: 9.5rem; }
+.newacct { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin-top: 1.5rem; }
+.newacct h2, .newacct p { flex: 1 0 100%; margin: 0 0 .2rem; }
+.newacct p { margin: 0; }
 nav { display: flex; gap: .4rem; flex-wrap: wrap; }
 nav a { color: var(--muted); padding: .35rem .75rem; border-radius: 9px; border: 1px solid transparent; transition: transform .30s cubic-bezier(.2,.8,.2,1), color .30s, border-color .30s, box-shadow .30s; }
 nav a:hover { color: var(--text); text-decoration: none; border-color: var(--line2); transform: translateY(-1px); }

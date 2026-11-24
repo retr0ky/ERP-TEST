@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block content %}
+<h1>Activity logs</h1>
+<form method="get" class="invbar no-print">
+  <input name="q" value="{{ q }}" placeholder="Search product, actor or reason" autofocus>
+  <button class="btn ghost">Filter</button>
+  {% if q %}<a class="btn ghost" href="{{ url_for('logs') }}">Clear</a>{% endif %}
+</form>
+{% if rows %}
+  <table class="inv">
+    <tr><th>When</th><th>Who</th><th>Product</th><th class="num">Was</th><th class="num">Now</th><th class="num">Delta</th><th>Reason</th></tr>
+    {% for l in rows %}
+      <tr>
+        <td class="muted small">{{ l['created_at'] }}</td>
+        <td>{{ l['actor'] or '-' }}</td>
+        <td class="name">{{ l['name'] }}</td>
+        <td class="num muted">{{ l['old_qty'] }}</td>
+        <td class="num">{{ l['new_qty'] }}</td>
+        <td class="num qty {{ 'bad' if l['delta'] < 0 else 'good' }}">{{ '+ ' if l['delta'] > 0 else '' }}{{ l['delta'] }}</td>
+        <td class="small">{{ l['reason'] }}{% if l['sale_id'] %} <span class="muted">(sale {{ l['sale_id'] }})</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+  </table>
+  <p class="muted small">Showing the newest {{ rows | length }} of the last stock moves (max 300).</p>
+{% else %}
+  <p class="muted">No stock activity yet.</p>
+{% endif %}
+{% endblock %}

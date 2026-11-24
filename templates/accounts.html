@@ -5,47 +5,56 @@
 <p class="muted small">Admin = full power. Cashier = sell, stock in, add new products, view everything.</p>
 
 <table class="inv">
-  <tr><th>Username</th><th>Role</th><th>Active</th><th>Last login</th><th class="acts">Actions</th></tr>
+  <tr><th>Username</th><th>Role</th><th>Active</th><th>Last login</th><th class="acts w-acacts">Actions</th></tr>
   {% for u in users %}
     <tr>
       <td class="name"><strong>{{ u['username'] }}</strong>{% if u['id'] == me['id'] %} <span class="muted small">(you)</span>{% endif %}</td>
       <td><span class="badge {{ u['role'] }}">{{ u['role'] }}</span></td>
       <td class="qty {{ 'bad' if not u['active'] }}">{{ 'yes' if u['active'] else 'disabled' }}</td>
       <td class="muted small">{{ u['last_login'] or '-' }}</td>
-      <td class="acts">
-        <form method="post" action="{{ url_for('account_update', uid=u['id']) }}" class="row inline">
+      <td class="acts"><div class="actcell">
+        <form method="post" action="{{ url_for('account_update', uid=u['id']) }}" class="inline actrow">
 {{ csrf_field }}
           <select name="role">
             {% for r in roles %}
             <option value="{{ r }}" {{ 'selected' if r == u['role'] }}>{{ r }}</option>
             {% endfor %}
           </select>
-          <input name="password" type="password" placeholder="new password (optional)" autocomplete="new-password">
-          <button class="btn tiny ghost">Save</button>
+          <button class="btn tiny ghost">Change role</button>
         </form>
-        <form method="post" action="{{ url_for('account_toggle', uid=u['id']) }}" class="inline" data-confirm="1">
+        <form method="post" action="{{ url_for('account_update', uid=u['id']) }}" class="inline actrow">
 {{ csrf_field }}
-          <button class="btn tiny {{ 'danger' if u['active'] else '' }}">{{ 'Disable' if u['active'] else 'Enable' }}</button>
+          <input name="password" type="password" placeholder="new password" autocomplete="new-password" minlength="{{ min_len }}">
+          <button class="btn tiny ghost">Reset password</button>
         </form>
-      </td>
+        <div class="actrow">
+          <form method="post" action="{{ url_for('account_toggle', uid=u['id']) }}" class="inline">
+{{ csrf_field }}
+            <button class="btn tiny ghost">{{ 'Disable' if u['active'] else 'Enable' }}</button>
+          </form>
+          <form method="post" action="{{ url_for('account_delete', uid=u['id']) }}" class="inline"
+                data-confirm="1">
+{{ csrf_field }}
+            <button class="btn tiny danger">Delete</button>
+          </form>
+        </div>
+      </div></td>
     </tr>
   {% endfor %}
 </table>
 
-<form method="post" action="{{ url_for('account_new') }}" class="form no-print" style="margin-top:1.5rem">
-{{ csrf_field }}
+<form method="post" action="{{ url_for('account_new') }}" class="form no-print newacct">
   <h2>New account</h2>
-  <div class="row">
-    <label>Username<input name="username" required maxlength="32" autocomplete="off" placeholder="lowercase, e.g. bat"></label>
-    <label>Password<input name="password" type="password" required minlength="{{ min_len }}" autocomplete="new-password"></label>
-    <label>Role
-      <select name="role">
-        <option value="cashier" selected>cashier</option>
-        <option value="admin">admin</option>
-      </select>
-    </label>
-    <button class="btn">Create account</button>
-  </div>
+{{ csrf_field }}
+  <label>Username<input name="username" required maxlength="32" autocomplete="off" placeholder="lowercase, e.g. bat"></label>
+  <label>Password<input name="password" type="password" required minlength="{{ min_len }}" autocomplete="new-password"></label>
+  <label>Role
+    <select name="role">
+      <option value="cashier" selected>cashier</option>
+      <option value="admin">admin</option>
+    </select>
+  </label>
+  <button class="btn">Create account</button>
   <p class="muted small">Passwords must be at least {{ min_len }} characters. There must always be at least one active admin.</p>
 </form>
 {% endblock %}
