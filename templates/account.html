@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}My account{% endblock %}
+{% block content %}
+<h1>My account</h1>
+<p class="muted">{{ me['username'] }} - <span class="badge {{ me['role'] }}">{{ me['role'] }}</span></p>
+<form method="post" class="form payform">
+{{ csrf_field }}
+  <label>Current password<input name="current_password" type="password" autocomplete="current-password" autofocus required></label>
+  <label>New password<input name="new_password" type="password" autocomplete="new-password" required minlength="{{ min_len }}"></label>
+  <button class="btn">Change password</button>
+</form>
+{% endblock %}

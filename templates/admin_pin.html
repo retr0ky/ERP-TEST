@@ -3,8 +3,10 @@
 {% block content %}
 <form method="post" action="{{ back }}" class="form payform">
   <h2>Manager PIN required</h2>
-  <p class="muted small">Voids, stock adjustments and deletes are admin-only. The PIN unlocks
-    the admin tier for {{ admin_window // 60 }} minutes.</p>
+  <p class="muted small">Edits, deletes, stock-outs, voids, sets and accounts are admin-only.
+    Enter the manager PIN to unlock the admin tier for {{ admin_window // 60 }} minutes,
+    or log in as an admin.</p>
+{{ csrf_field }}
   {% for key, value in form.items() %}{% if key != 'csrf' %}
   <input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
   <input type="password" name="admin_pin" id="admin_pin" autocomplete="off" autofocus

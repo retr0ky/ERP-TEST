@@ -11,9 +11,14 @@ def chk(cond, label, extra=""):
     if not cond:
         fails.append(label)
 
+_conn = A.connect()
+UID = _conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()[0]
+_conn.close()
 c = A.app.test_client()
 with c.session_transaction() as _s:
     _s["csrf"] = "testtoken"
+    _s["authed"] = True
+    _s["uid"] = UID
 _post = c.post
 def _post2(url, data=None, **kw):
     h = dict(kw.pop("headers", None) or {})

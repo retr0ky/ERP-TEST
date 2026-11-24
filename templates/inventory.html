@@ -63,12 +63,14 @@
               <button class="btn tiny" title="Add to POS cart">+ POS</button>
             </form>
             <a class="btn tiny ghost" href="{{ url_for('product_adjust', pid=p['id']) }}">Stock</a>
+            {% if is_admin %}
             <a class="btn tiny ghost" href="{{ url_for('product_edit', pid=p['id']) }}">Edit</a>
             <form method="post" action="{{ url_for('product_delete', pid=p['id']) }}" class="inline"
                   data-confirm="1">
 {{ csrf_field }}
               <button class="btn tiny danger">Delete</button>
             </form>
+            {% endif %}
           </div></td>
         </tr>
       {% endfor %}
@@ -80,7 +82,7 @@
   {% endif %}
 {% elif tab == 'sets' %}
   <div class="row no-print" style="margin:0 0 1rem">
-    <a class="btn" href="{{ url_for('set_new') }}">Create set</a>
+    {% if is_admin %}<a class="btn" href="{{ url_for('set_new') }}">Create set</a>{% endif %}
     <p class="muted small">Sets are bundles. They show as quick-add buttons on the POS page and sell as one line while reducing component stock.</p>
   </div>
   {% if sets %}
@@ -101,12 +103,14 @@
 {{ csrf_field }}
               <button class="btn" title="Add set to POS cart" {% if s['can_sell'] == 0 %}disabled{% endif %}>+ POS</button>
             </form>
+            {% if is_admin %}
             <a class="btn ghost" href="{{ url_for('set_edit', sid=s['id']) }}">Edit</a>
             <form method="post" action="{{ url_for('set_delete', sid=s['id']) }}" class="inline"
                   data-confirm="1">
 {{ csrf_field }}
               <button class="btn danger">Delete</button>
             </form>
+            {% endif %}
           </div></td>
         </tr>
       {% endfor %}
@@ -114,7 +118,7 @@
     <p class="muted small">{{ sets | length }} active set(s).</p>
   {% else %}
     <p class="muted">No sets yet - create one and it appears as a quick-add option in POS.</p>
-    <a class="btn" href="{{ url_for('set_new') }}">Create set</a>
+    {% if is_admin %}<a class="btn" href="{{ url_for('set_new') }}">Create set</a>{% endif %}
   {% endif %}
 {% elif tab == 'categories' %}
   <form method="post" action="{{ url_for('category_add') }}" class="form no-print">
@@ -128,19 +132,25 @@
       {% for c in categories %}
         <tr>
           <td class="catname">
+            {% if is_admin %}
             <form method="post" action="{{ url_for('category_edit', cid=c['id']) }}" class="row inline">
 {{ csrf_field }}
               <input name="name" value="{{ c['name'] }}" required>
               <button class="btn tiny ghost">Save</button>
             </form>
+            {% else %}
+            {{ c['name'] }}
+            {% endif %}
           </td>
           <td class="num qty">{{ c['product_count'] }}</td>
           <td class="acts one"><div class="acts-grid g1">
+            {% if is_admin %}
             <form method="post" action="{{ url_for('category_delete', cid=c['id']) }}" class="inline"
                   data-confirm="1">
 {{ csrf_field }}
               <button class="btn tiny danger">Delete</button>
             </form>
+            {% endif %}
           </div></td>
         </tr>
       {% endfor %}
@@ -172,6 +182,7 @@
           <td class="num qty muted">{{ p['qty'] }}</td>
           <td class="muted">{{ p['supplier'] or '-' }}</td>
           <td class="acts two"><div class="acts-grid g2">
+            {% if is_admin %}
             <form method="post" action="{{ url_for('product_restore', pid=p['id']) }}" class="inline">
 {{ csrf_field }}
               <button class="btn tiny">Restore</button>
@@ -181,6 +192,7 @@
 {{ csrf_field }}
               <button class="btn tiny danger">Purge</button>
             </form>
+            {% endif %}
           </div></td>
         </tr>
       {% endfor %}

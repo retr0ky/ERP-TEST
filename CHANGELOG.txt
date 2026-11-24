@@ -1,5 +1,25 @@
 ERP CHANGELOG (single file from 2026-11-24 onward)
 
+==== 2026-11-24: User accounts + roles (admin / cashier) ====
+- New users table (schema v6) + first-run seed: one admin account. Password comes from
+  ERP_ADMIN_PASSWORD, else the old ERP_PASSWORD, else a generated one printed once at startup.
+  Login is now username + password (hashed, werkzeug scrypt/pbkdf2); the single shared
+  ERP_PASSWORD login is gone. Per-IP brute-force throttling unchanged.
+- Roles: admin = everything. Cashier = sell, stock IN (restock), add fresh products, view
+  inventory/sales/receipts. Admin-only: product edit/delete/restore/purge, stock OUT,
+  category rename/delete, sets (create/edit/delete), sale void, Accounts.
+- Admin forms are gated on GET too - a cashier never sees a Delete button. Server-side gate
+  regardless. Manager PIN (ERP_ADMIN_PASSWORD) still escalates a cashier session for
+  ADMIN_WINDOW minutes; audit trail records those actions as 'name+PIN'.
+- Accounts page (admin): create users, change role, reset password, enable/disable.
+  Guards: never zero active admins (no disabling/demoting the last one), self-disable logs out.
+  Anyone can change their own password at /account.
+- Login/logout now clears the till: cart, sets, payments never carry between accounts.
+  CSRF token rotates on login. nxt= redirect restricted to local paths (no open redirect).
+- Disabling an account locks its live sessions out on the next request (session checked
+  against the DB each request).
+- tests/test_accounts.py added (34 checks); checkout/search/leasing suites updated. All pass.
+
 ==== CHANGELOG-20261104.txt ====
 ERP DEV LOG — 2026-11-04 (session handoff file)
 Location: ~/Desktop/ERP   Stack: Flask 3.1.3 / Python 3.14.8 / SQLite (erp.db) / Jinja2 / single static/style.css

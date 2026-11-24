@@ -21,6 +21,16 @@
       <a class="{{ 'active' if ep and (ep == 'inventory' or ep == 'inventory_deleted' or ep.startswith('product_') or ep.startswith('category_')) }}" href="{{ url_for('inventory') }}">Inventory</a>
       <a class="{{ 'active' if ep in ('sales', 'receipt') }}" href="{{ url_for('sales') }}">Sales</a>
     </nav>
+    <div class="userbox">
+      {% if me %}
+      <a class="username" href="{{ url_for('account_self') }}" title="Change my password">{{ me['username'] }}</a>
+      <span class="badge {{ me['role'] }}">{{ me['role'] }}</span>
+      {% endif %}
+      {% if is_admin %}
+      <a href="{{ url_for('accounts') }}">Accounts</a>
+      {% endif %}
+      <a class="danger-link" href="{{ url_for('logout') }}">Log out</a>
+    </div>
     <div class="themesel">
       <label for="erp-theme" class="small muted">Theme</label>
       <select id="erp-theme" title="Colour palette">

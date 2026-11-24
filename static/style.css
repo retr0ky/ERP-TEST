@@ -109,6 +109,17 @@ a:hover { text-decoration: underline; }
   font-size: 1.12rem; color: var(--red);
   text-shadow: 0 0 18px rgba(var(--accent-rgb), .55);
 }
+.userbox { display: flex; align-items: center; gap: .55rem; font-size: .85rem; }
+.userbox a { color: var(--muted); }
+.userbox a:hover { color: var(--text); text-decoration: none; }
+.userbox .username { color: var(--hi); font-weight: 650; }
+.userbox .danger-link { color: var(--red-hot); }
+.badge {
+  font-size: .7rem; text-transform: uppercase; letter-spacing: .06em;
+  padding: .15rem .5rem; border-radius: 999px; border: 1px solid var(--line2);
+}
+.badge.admin { color: var(--on-accent); background: linear-gradient(135deg, var(--red), var(--red-deep)); border-color: transparent; }
+.badge.cashier { color: var(--amber); background: rgba(var(--amber-rgb), .12); }
 nav { display: flex; gap: .4rem; flex-wrap: wrap; }
 nav a { color: var(--muted); padding: .35rem .75rem; border-radius: 9px; border: 1px solid transparent; transition: transform .30s cubic-bezier(.2,.8,.2,1), color .30s, border-color .30s, box-shadow .30s; }
 nav a:hover { color: var(--text); text-decoration: none; border-color: var(--line2); transform: translateY(-1px); }

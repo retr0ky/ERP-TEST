@@ -1,5 +1,8 @@
-"""Single-user ERP: POS main screen + Inventory with categories inside Inventory.
+"""ERP with user accounts: POS main screen + Inventory with categories inside Inventory.
 
+Two roles:
+  admin   - everything, including deletes, edits, voids, sets and account management
+  cashier - sell, restock (stock in), add fresh products, view inventory and sales
 Run:  python3 app.py          -> http://127.0.0.1:5000
 """
 import json
@@ -10,6 +13,7 @@ import time
 from pathlib import Path
 
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE = Path(__file__).resolve().parent
 
@@ -111,40 +115,101 @@ def login_failed(ip):
     return locked
 
 
+# ------------------------------------------------------------------- accounts
+ROLES = ("admin", "cashier")
+USERNAME_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{2,31}\Z")
+MIN_PASSWORD_LEN = 6
+
+
+def seed_users(conn):
+    """First run: create one admin so the shop opens with a known login.
+    Password order: ERP_ADMIN_PASSWORD, then the old ERP_PASSWORD, then generated."""
+    if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+        return
+    name = (os.environ.get("ERP_ADMIN_USER") or "admin").strip().lower()
+    if not USERNAME_RE.match(name):
+        name = "admin"
+    password = os.environ.get("ERP_ADMIN_PASSWORD") or PASSWORD
+    generated = not password
+    if generated:
+        password = secrets.token_urlsafe(9)
+    conn.execute("INSERT INTO users (username, pass_hash, role) VALUES (?, ?, 'admin')",
+                 (name, generate_password_hash(password)))
+    if generated:
+        app.logger.warning("created admin account '%s' with password '%s' - "
+                           "log in and change it under Accounts.", name, password)
+
+
+def current_user():
+    """The logged-in user straight from the DB (cached per request), or None.
+    Disabling an account locks its session out on the very next request."""
+    if "user" in g:
+        return g.user or None
+    g.user = False
+    if session.get("authed") and session.get("uid"):
+        row = db().execute("SELECT id, username, role, active FROM users WHERE id = ?",
+                           (session["uid"],)).fetchone()
+        if row is not None and row["active"]:
+            g.user = row
+            session["uname"] = row["username"]
+            session["role"] = row["role"]
+    return g.user or None
+
+
+def safe_next(nxt):
+    """Only ever redirect to a path on this app - never to another host."""
+    return nxt if nxt and nxt.startswith("/") and not nxt.startswith("//") else None
+
+
 @app.before_request
 def login_gate():
-    """Optional single-user gate - only active when ERP_PASSWORD is set."""
-    if not PASSWORD or session.get("authed"):
-        return None
+    """Every page needs a logged-in account; only login/logout/static are public."""
     if request.endpoint in ("login", "logout", "static"):
+        return None
+    if current_user():
         return None
     return redirect(url_for("login", nxt=request.path))
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    nxt = request.args.get("nxt") or url_for("pos")
+    nxt = safe_next(request.args.get("nxt")) or url_for("pos")
     if request.method == "POST":
         ip = request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
         left = login_lockout(ip)
         if left:
             app.logger.warning("login throttled for %s - %ds left", ip, left)
-            flash(f"Too many wrong passwords. Try again in {left}s.", "error")
+            flash(f"Too many wrong logins. Try again in {left}s.", "error")
             return render_template("login.html", nxt=nxt), 429
-        if PASSWORD and hmac.compare_digest(request.form.get("password", ""), PASSWORD):
+        username = (request.form.get("username") or "").strip().lower()
+        password = request.form.get("password") or ""
+        row = db().execute("SELECT id, username, role, pass_hash FROM users"
+                           " WHERE username = ? AND active = 1", (username,)).fetchone()
+        if row is not None and check_password_hash(row["pass_hash"], password):
             LOGIN_LOCKS.pop(ip, None)
+            session.clear()
             session["authed"] = True
-            session["cart"] = session.get("cart", {})
-            return redirect(nxt)
+            session["uid"] = row["id"]
+            session["uname"] = row["username"]
+            session["role"] = row["role"]
+            session["csrf"] = secrets.token_hex(16)   # fresh token per login
+            session["cart"] = {}           # every cashier starts on a clean till
+            session["sets"] = {}
+            session["payments"] = []
+            db().execute("UPDATE users SET last_login = datetime('now','localtime') WHERE id = ?",
+                         (row["id"],))
+            db().commit()
+            return redirect(safe_next(request.form.get("nxt")) or nxt)
         login_failed(ip)
-        flash("Wrong password.", "error")
+        flash("Wrong username or password.", "error")
     return render_template("login.html", nxt=nxt)
 
 
 @app.route("/logout")
 def logout():
-    session.pop("authed", None)
-    session.pop("admin_until", None)
+    for key in ("authed", "uid", "uname", "role", "admin_until",
+                "cart", "sets", "payments", "customer"):
+        session.pop(key, None)
     return redirect(url_for("login"))
 
 
@@ -156,14 +221,18 @@ MAX_QTY_PER_LINE = int(os.environ.get("ERP_MAX_QTY_PER_LINE") or 999)
 HELD_SCHEMA = 1        # bump when the held-cart blob layout changes; resume refuses mismatches
 
 
-ADMIN_ONLY = {"product_adjust", "product_delete", "product_purge", "product_restore",
-            "category_delete", "set_delete", "sale_void"}
+ADMIN_ONLY = {"product_edit", "product_delete", "product_purge", "product_restore",
+              "category_edit", "category_delete", "set_new", "set_edit", "set_delete",
+              "sale_void", "accounts", "account_new", "account_update", "account_toggle"}
 
 @app.before_request
 def csrf_gate():
-    """Session token must come back on every mutating request (form field or header)."""
+    """Admin pages are gated on GET too (a cashier never sees the form), and the
+    session token must come back on every mutating request (form field or header)."""
     if "csrf" not in session:
         session["csrf"] = secrets.token_hex(16)
+    if request.endpoint in ADMIN_ONLY:
+        return admin_gate()
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return None
     sent = request.form.get("csrf") or request.headers.get("X-CSRF-Token") or ""
@@ -172,13 +241,13 @@ def csrf_gate():
         if wants_json():
             return jsonify(ok=False, error=msg), 400
         return render_template("error.html", msg=msg), 400
-    if request.endpoint in ADMIN_ONLY:
-        return admin_gate()
 
 
 def is_admin():
-    if not ADMIN_PASSWORD:
-        return True                       # single-user install: no second tier configured
+    """Admin by account role, or by manager-PIN escalation unlocked earlier (admin_gate)."""
+    user = current_user()
+    if user is not None and user["role"] == "admin":
+        return True
     until = session.get("admin_until") or 0
     return time.time() < until
 
@@ -200,7 +269,133 @@ def admin_gate():
 
 
 def actor():
-    return "admin" if (ADMIN_PASSWORD and is_admin()) else "cashier"
+    """Who the audit trail blames - 'name+PIN' when a cashier used the manager PIN."""
+    user = current_user()
+    if user is None:
+        return "anonymous"
+    if user["role"] != "admin" and is_admin():
+        return user["username"] + "+PIN"
+    return user["username"]
+
+
+# ------------------------------------------------------------ account management
+def new_user_error(username, password, role):
+    if not USERNAME_RE.match(username or ""):
+        return ("Username must be 3-32 characters: lowercase letters, digits, "
+                "dot, dash or underscore, starting with a letter or digit.")
+    if len(password) < MIN_PASSWORD_LEN:
+        return f"Password needs at least {MIN_PASSWORD_LEN} characters."
+    if role not in ROLES:
+        return "Unknown role."
+    return None
+
+
+def is_last_active_admin(uid):
+    row = db().execute("SELECT role, active FROM users WHERE id = ?", (uid,)).fetchone()
+    if row is None or row["role"] != "admin" or not row["active"]:
+        return False
+    others = db().execute("SELECT COUNT(*) AS n FROM users"
+                          " WHERE role = 'admin' AND active = 1 AND id <> ?", (uid,)).fetchone()
+    return others["n"] == 0
+
+
+@app.route("/accounts")
+def accounts():
+    rows = db().execute("SELECT id, username, role, active, created_at, last_login"
+                        " FROM users ORDER BY role DESC, username").fetchall()
+    return render_template("accounts.html", users=rows, roles=ROLES,
+                           min_len=MIN_PASSWORD_LEN)
+
+
+@app.route("/accounts/new", methods=["POST"])
+def account_new():
+    username = (request.form.get("username") or "").strip().lower()
+    password = request.form.get("password") or ""
+    role = (request.form.get("role") or "cashier").strip()
+    err = new_user_error(username, password, role)
+    if err:
+        flash(err, "error")
+        return redirect(url_for("accounts"))
+    try:
+        db().execute("INSERT INTO users (username, pass_hash, role) VALUES (?, ?, ?)",
+                     (username, generate_password_hash(password), role))
+        db().commit()
+        flash(f"Account {username} created as {role}.", "ok")
+    except sqlite3.IntegrityError:
+        db().rollback()
+        flash("That username already exists.", "error")
+    return redirect(url_for("accounts"))
+
+
+@app.route("/accounts/<int:uid>", methods=["POST"])
+def account_update(uid):
+    user = db().execute("SELECT id, username, role, active FROM users WHERE id = ?",
+                        (uid,)).fetchone()
+    if user is None:
+        flash("Account not found.", "error")
+        return redirect(url_for("accounts"))
+    role = (request.form.get("role") or user["role"]).strip()
+    password = request.form.get("password") or ""
+    if role not in ROLES:
+        flash("Unknown role.", "error")
+        return redirect(url_for("accounts"))
+    demoting = user["role"] == "admin" and (role != "admin" or not user["active"])
+    if demoting and is_last_active_admin(uid):
+        flash("Cannot demote the last active admin.", "error")
+        return redirect(url_for("accounts"))
+    if role != user["role"]:
+        db().execute("UPDATE users SET role = ? WHERE id = ?", (role, uid))
+        session.pop("admin_until", None)     # a role change re-decides the current session
+    if password:
+        if len(password) < MIN_PASSWORD_LEN:
+            db().rollback()
+            flash(f"Password needs at least {MIN_PASSWORD_LEN} characters.", "error")
+            return redirect(url_for("accounts"))
+        db().execute("UPDATE users SET pass_hash = ? WHERE id = ?",
+                     (generate_password_hash(password), uid))
+        if uid == session.get("uid"):
+            flash("Your password was changed.", "ok")
+    db().commit()
+    flash(f"Account {user['username']} updated.", "ok")
+    return redirect(url_for("accounts"))
+
+
+@app.route("/accounts/<int:uid>/toggle", methods=["POST"])
+def account_toggle(uid):
+    user = db().execute("SELECT id, username, role, active FROM users WHERE id = ?",
+                        (uid,)).fetchone()
+    if user is None:
+        flash("Account not found.", "error")
+        return redirect(url_for("accounts"))
+    if user["active"] and is_last_active_admin(uid):
+        flash("Cannot disable the last active admin.", "error")
+        return redirect(url_for("accounts"))
+    db().execute("UPDATE users SET active = ? WHERE id = ?", (0 if user["active"] else 1, uid))
+    db().commit()
+    if uid == session.get("uid") and user["active"]:
+        return redirect(url_for("logout"))   # switched myself off
+    flash(f"Account {user['username']} " + ("disabled." if user["active"] else "enabled."), "ok")
+    return redirect(url_for("accounts"))
+
+
+@app.route("/account", methods=["GET", "POST"])
+def account_self():
+    """Any logged-in user can change their own password."""
+    me = current_user()
+    if request.method == "POST":
+        row = db().execute("SELECT pass_hash FROM users WHERE id = ?", (me["id"],)).fetchone()
+        current = request.form.get("current_password") or ""
+        new = request.form.get("new_password") or ""
+        if not check_password_hash(row["pass_hash"], current):
+            flash("Current password is wrong.", "error")
+        elif len(new) < MIN_PASSWORD_LEN:
+            flash(f"New password needs at least {MIN_PASSWORD_LEN} characters.", "error")
+        else:
+            db().execute("UPDATE users SET pass_hash = ? WHERE id = ?",
+                         (generate_password_hash(new), me["id"]))
+            db().commit()
+            flash("Password changed.", "ok")
+    return render_template("account.html", me=me, min_len=MIN_PASSWORD_LEN)
 
 
 @app.context_processor
@@ -210,6 +405,7 @@ def security_globals():
             "csrf_field": Markup('<input type="hidden" name="csrf" value="'
                                    + session.get("csrf", "") + '">'),
             "is_admin": is_admin(),
+            "me": current_user(),
             "ADMIN_ON": bool(ADMIN_PASSWORD)}
 
 app.jinja_env.globals["CURRENCY"] = CURRENCY
@@ -229,7 +425,7 @@ app.jinja_env.globals["asset_v"] = asset_v
 
 # Bump this whenever SCHEMA/migrations below change - it is what lets a hosted
 # database skip the whole migration crawl on boot (6.7s of round trips -> 2).
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -352,6 +548,16 @@ CREATE TABLE IF NOT EXISTS shifts (
 /* One permanent row: a stock guard that fails inserts id 1 a second time and
    aborts the whole checkout transaction instead of going negative. */
 CREATE TABLE IF NOT EXISTS stock_guards (id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    pass_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin','cashier')),
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    last_login TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
 CREATE INDEX IF NOT EXISTS idx_inv_logs_product ON inventory_logs(product_id);
 CREATE INDEX IF NOT EXISTS idx_inv_logs_created ON inventory_logs(created_at);
 """
@@ -707,6 +913,7 @@ def init_db(conn=None):
                  f" WHERE key IN ({keys}) AND requires_note <> 1")
     conn.execute(f"UPDATE payment_methods SET requires_note = 0"
                  f" WHERE key NOT IN ({keys}) AND requires_note <> 0")
+    seed_users(conn)
     backfill_search(conn)
     conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
                  " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (SCHEMA_VERSION,))
@@ -992,6 +1199,11 @@ def product_adjust(pid):
         direction = request.form.get("direction")
         if qty <= 0:
             flash("Quantity must be a positive whole number.", "error")
+        elif direction != "in" and not is_admin():
+            # cashiers restock; taking stock out (damage, loss, shrinkage) needs the admin tier
+            gate = admin_gate()
+            if gate:
+                return gate
         elif direction == "out" and qty > p["qty"]:
             flash(f"Cannot remove {qty} - only {p['qty']} in stock.", "error")
         else:

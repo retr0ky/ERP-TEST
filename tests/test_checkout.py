@@ -42,6 +42,10 @@ conn.execute("INSERT INTO products (name, price, qty, active) VALUES (?, ?, ?, 1
 conn.commit()
 pid = conn.execute("SELECT id FROM products WHERE name = 'Race Widget'").fetchone()[0]
 pm = conn.execute("SELECT key FROM payment_methods WHERE active = 1 LIMIT 1").fetchone()[0]
+conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('cash', 'x', 'cashier')")
+conn.commit()
+CASH_UID = conn.execute("SELECT id FROM users WHERE username = 'cash'").fetchone()[0]
+ADMIN_UID = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()[0]
 conn.close()
 
 
@@ -50,6 +54,7 @@ def client_for(cart=None, pays=None, admin=True):
     with c.session_transaction() as s:
         s["csrf"] = "tok"
         s["authed"] = True
+        s["uid"] = ADMIN_UID if admin else CASH_UID
         s["cart"] = {str(pid): 1} if cart is None else cart
         s["sets"] = {}
         s["payments"] = [{"method": pm, "amount": 200000.0, "note": ""}] if pays is None else pays
@@ -156,6 +161,7 @@ c = A.app.test_client()
 with c.session_transaction() as s:
     s["csrf"] = "tok"
     s["authed"] = True
+    s["uid"] = CASH_UID
     s.pop("admin_until", None)
 r = post(c, f"/inventory/{pid}/delete", headers={"X-FX": "1"})
 body = r.get_json() or {}
@@ -185,6 +191,7 @@ c = A.app.test_client()
 with c.session_transaction() as s:
     s["csrf"] = "tok"
     s["authed"] = True
+    s["uid"] = ADMIN_UID
 r = c.post("/pos/clear", data={}, headers={"X-FX": "1", "X-CSRF-Token": "nope"})
 chk(r.status_code == 400 and (r.get_json() or {}).get("error"),
     "csrf failure answers fetch with JSON", (r.status_code, r.get_data(as_text=True)[:80]))

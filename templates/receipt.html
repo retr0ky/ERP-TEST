@@ -8,11 +8,13 @@
       <button class="btn" onclick="window.print()">Print</button>
       <a class="btn ghost" href="{{ url_for('sales') }}">All sales</a>
       <a class="btn ghost" href="{{ url_for('pos') }}">New sale</a>
+      {% if is_admin %}
       <form method="post" action="{{ url_for('sale_void', sale_id=sale['id']) }}" class="inline"
             data-confirm="1">
 {{ csrf_field }}
         <button class="btn danger">Void sale</button>
       </form>
+      {% endif %}
     </div>
   </div>
   <p class="muted">{{ sale['created_at'] }}</p>
