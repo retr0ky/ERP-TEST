@@ -20,7 +20,9 @@ def shared_columns(local, remote, table):
 
 def bump_sequence(remote, table, max_id):
     try:
-        remote.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = ?", (max_id, table))
+        # only ever raise it - lowering it would hand out ids (sale numbers) again
+        remote.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
+                       (max_id, table))
     except Exception as exc:
         print(f"  sequence bump skipped for {table}: {exc}")
 

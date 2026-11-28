@@ -874,10 +874,17 @@ class DB:
 def connect():
     if TURSO_URL:
         import libsql
-        return DB(libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN))
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return DB(conn)
+        conn = DB(libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN))
+    else:
+        raw = sqlite3.connect(DB_PATH)
+        raw.row_factory = sqlite3.Row
+        conn = DB(raw)
+    # SQLite ignores REFERENCES ... ON DELETE unless this is switched on, per connection.
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+    except Exception as exc:                          # a backend without the pragma
+        app.logger.warning("could not enable foreign keys: %s", exc)
+    return conn
 
 
 def db():
@@ -1270,12 +1277,19 @@ def product_new():
             return render_product_form(request.form, "Create")
         values = form_values(request.form)
         try:
-            db().execute(
+            cur = db().execute(
                 """INSERT INTO products (sku, name, cost, price, qty, low_stock_at, barcode,
                                          brand, model, specifications, category_id, supplier_id,
                                          active, n_search, n_sku, n_barcode)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
                 (*values, *product_stamp(values[0], values[1], values[6], values[7])))
+            new_id = cur.lastrowid
+            if values[4]:
+                # the opening stock is a stock move like any other
+                db().execute("""INSERT INTO inventory_logs
+                                (product_id, old_qty, new_qty, delta, reason, actor)
+                                VALUES (?, 0, ?, ?, 'new product', ?)""",
+                             (new_id, values[4], values[4], actor()))
             db().commit()
         except sqlite3.IntegrityError:
             db().rollback()
@@ -1299,6 +1313,13 @@ def product_edit(pid):
             return render_product_form(request.form, "Save")
         values = form_values(request.form)
         try:
+            # Typing a new number on the form is still a stock move - log it against the
+            # stock as it is right now (a sale may have landed since the form opened).
+            db().execute("""INSERT INTO inventory_logs
+                            (product_id, old_qty, new_qty, delta, reason, actor)
+                            SELECT id, qty, ?, ? - qty, 'edited on product form', ?
+                            FROM products WHERE id = ? AND qty <> ?""",
+                         (values[4], values[4], actor(), pid, values[4]))
             db().execute(
                 """UPDATE products SET sku=?, name=?, cost=?, price=?, qty=?, low_stock_at=?,
                        barcode=?, brand=?, model=?, specifications=?, category_id=?, supplier_id=?,
@@ -1378,6 +1399,13 @@ def product_restore(pid):
 
 @app.route("/inventory/<int:pid>/purge", methods=["POST"])
 def product_purge(pid):
+    in_sets = db().execute("""SELECT s.name FROM set_products sp JOIN sets s ON s.id = sp.set_id
+                              WHERE sp.product_id = ? ORDER BY s.name""", (pid,)).fetchall()
+    if in_sets:
+        # Purging would silently drop it from these sets and change what they sell.
+        flash("Cannot delete permanently - it is a component of: "
+              + ", ".join(r["name"] for r in in_sets) + ". Edit those sets first.", "error")
+        return redirect(url_for("inventory", tab="deleted"))
     db().execute("DELETE FROM products WHERE id = ?", (pid,))
     db().commit()
     flash("Product deleted permanently. Past sales are kept.", "ok")

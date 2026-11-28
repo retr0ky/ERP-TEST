@@ -218,6 +218,39 @@ rc = client().get(f"/sales/{sid}").get_data(as_text=True)
 chk("Customer surcharge" in rc, "receipt keeps the surcharge after the rate is changed")
 
 
+# ------------------------------------------------------------ foreign keys + purge guard
+c = client()
+post(c, "/inventory/new", {"name": "Audit Widget", "price": "10", "qty": "4", "sku": "AUD-1"})
+pn = q1("SELECT id FROM products WHERE sku = 'AUD-1'")[0]
+log = q1("SELECT old_qty, new_qty, delta, reason FROM inventory_logs WHERE product_id=?", (pn,))
+chk(log is not None and tuple(log) == (0, 4, 4, "new product"), "opening stock is logged",
+    tuple(log) if log else None)
+post(c, f"/inventory/{pn}/edit", {"name": "Audit Widget", "price": "10", "qty": "9", "sku": "AUD-1"})
+log = q1("SELECT old_qty, new_qty, delta, reason FROM inventory_logs WHERE product_id=? "
+         "ORDER BY id DESC", (pn,))
+chk(tuple(log) == (4, 9, 5, "edited on product form"), "editing qty on the form is logged",
+    tuple(log))
+n = q1("SELECT COUNT(*) FROM inventory_logs WHERE product_id=?", (pn,))[0]
+post(c, f"/inventory/{pn}/edit", {"name": "Audit Widget 2", "price": "10", "qty": "9", "sku": "AUD-1"})
+chk(q1("SELECT COUNT(*) FROM inventory_logs WHERE product_id=?", (pn,))[0] == n,
+    "edit without a qty change writes no stock log")
+
+sid_set = run("INSERT INTO sets (name) VALUES ('Guard Set')")
+run("INSERT INTO set_products (set_id, product_id, qty) VALUES (?, ?, 1)", (sid_set, pn))
+post(c, f"/inventory/{pn}/delete")
+r = post(c, f"/inventory/{pn}/purge")
+chk(q1("SELECT 1 FROM products WHERE id=?", (pn,)) is not None,
+    "purge refused while the product is in a set")
+run("DELETE FROM set_products WHERE set_id=?", (sid_set,))
+sid = sell(cart={str(p1): 1})
+item = q1("SELECT id FROM sale_items WHERE sale_id=?", (sid,))[0]
+post(c, f"/inventory/{p1}/delete")
+post(c, f"/inventory/{p1}/purge")
+chk(q1("SELECT product_id FROM sale_items WHERE id=?", (item,))[0] is None,
+    "purge: past sale lines keep their name, product_id becomes NULL (foreign keys on)")
+chk(A.connect().execute("PRAGMA foreign_keys").fetchone()[0] == 1, "connections enable foreign keys")
+
+
 # --------------------------------------------------------------------------- done
 print("\nFAILS:", fails or "none")
 sys.exit(1 if fails else 0)
