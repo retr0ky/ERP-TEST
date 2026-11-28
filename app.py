@@ -2160,24 +2160,41 @@ def pos_hold_resume(hid):
         data = {}
     if not isinstance(data, dict) or data.get("v", HELD_SCHEMA) != HELD_SCHEMA:
         # A blob from another build is left where it is rather than half-merged.
+        version = data.get("v", "unset") if isinstance(data, dict) else "unreadable"
         flash(f"Held cart '{row['label']}' was written by an older version "
-              f"(v{data.get('v', 'unset')}) - delete it and rebuild the cart.", "error")
+              f"(v{version}) - delete it and rebuild the cart.", "error")
         return pos_redirect()
     cart = session.get("cart", {})
-    for pid, qty in (data.get("cart") or {}).items():
+    cart_blob = data.get("cart") if isinstance(data.get("cart"), dict) else {}
+    sets_blob = data.get("sets") if isinstance(data.get("sets"), dict) else {}
+    for pid, qty in cart_blob.items():
         pid_i, qty_i = to_int(pid), to_int(qty)
         if pid_i is None or not qty_i:
             continue
         cart[str(pid_i)] = min(cart.get(str(pid_i), 0) + qty_i, MAX_QTY_PER_LINE)
     cart_sets = session.get("sets", {})
-    for sid, qty in (data.get("sets") or {}).items():
+    for sid, qty in sets_blob.items():
         sid_i, qty_i = to_int(sid), to_int(qty)
         if sid_i is None or not qty_i:
             continue
         cart_sets[str(sid_i)] = min(cart_sets.get(str(sid_i), 0) + qty_i, MAX_QTY_PER_LINE)
     session["cart"] = cart
     session["sets"] = cart_sets
-    session["payments"] = payment_lines() + list(data.get("payments") or [])
+    methods = payment_map()
+    kept = []
+    for pay in data.get("payments") or []:
+        # only well-formed lines for a method that still exists; anything else would
+        # crash the totals later
+        if not isinstance(pay, dict) or pay.get("method") not in methods:
+            continue
+        try:
+            amount = round(float(pay.get("amount")), 2)
+        except (TypeError, ValueError):
+            continue
+        if amount > 0 and amount == amount:          # rejects NaN too
+            kept.append({"method": pay["method"], "amount": amount,
+                         "note": clean_pay_note(pay.get("note"))})
+    session["payments"] = payment_lines() + kept
     db().execute("DELETE FROM held_carts WHERE id = ?", (hid,))
     db().commit()
     flash(f"Resumed held cart: {row['label']}.", "ok")

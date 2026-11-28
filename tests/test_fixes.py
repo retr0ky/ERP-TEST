@@ -292,6 +292,22 @@ chk("page 2 of" in html and "Older" in html and "Newer" in html, "pager links re
 A.SALES_PAGE = 100
 
 
+# ------------------------------------------------------------ malformed held carts
+c = client()
+h1 = run("INSERT INTO held_carts (label, data) VALUES ('list blob', '[1, 2]')")
+r = post(c, f"/pos/hold/{h1}/resume")
+chk(r.status_code == 302, "held cart that is a JSON list does not crash resume", r.status_code)
+h2 = run("""INSERT INTO held_carts (label, data) VALUES ('bad pays',
+         '{"v": 1, "cart": {}, "sets": {}, "payments": [{"method": "cash"}, "x",
+           {"method": "cash", "amount": "nan"}, {"method": "cash", "amount": 500}]}')""")
+post(c, f"/pos/hold/{h2}/resume")
+with c.session_transaction() as s_:
+    pays = s_.get("payments")
+chk(pays == [{"method": "cash", "amount": 500.0, "note": ""}],
+    "only well-formed payment lines survive a resume", pays)
+chk(c.get("/pos").status_code == 200, "POS still renders after resuming it")
+
+
 # --------------------------------------------------------------------------- done
 print("\nFAILS:", fails or "none")
 sys.exit(1 if fails else 0)
