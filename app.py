@@ -29,7 +29,11 @@ def load_dotenv():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
-            os.environ.setdefault(key, value)
+            # 'KEY=value   # note' -> 'value' (as .env.example writes them); quotes optional
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            os.environ.setdefault(key.strip(), value)
 
 
 load_dotenv()
@@ -75,7 +79,7 @@ PASSWORD = os.environ.get("ERP_PASSWORD") or ""
 
 app = Flask(__name__)
 if PUBLIC and not os.environ.get("ERP_SECRET_KEY"):
-    raise RuntimeError("ERP_PUBLIC=1 needs ERP_SECRET_KEY (stable sessions) and ERP_PASSWORD (login).")
+    raise RuntimeError("ERP_PUBLIC=1 needs ERP_SECRET_KEY (stable sessions across restarts).")
 app.secret_key = os.environ.get("ERP_SECRET_KEY") or secrets.token_hex(32)
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                   SESSION_COOKIE_SECURE=PUBLIC)

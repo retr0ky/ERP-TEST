@@ -1,5 +1,29 @@
 ERP CHANGELOG (single file from 2026-11-24 onward)
 
+==== 2026-11-28: Audit fixes (security, money, stock, speed) ====
+Schema v8 (migrates itself on first boot): sales.voided_at / voided_by, login_throttle table.
+Security
+- CSRF token is now checked on admin-only routes too (they skipped it - a forged POST could create an admin).
+- Set form escapes product names/brands/models/SKUs (cashier-made product names could run script for an admin).
+- Manager PIN: own secret ERP_MANAGER_PIN (falls back to ERP_ADMIN_PASSWORD with a warning), throttled
+  per account, form/header only (not the query string), never echoed back.
+- Login lockout lives in the DB (survives Vercel cold starts / parallel instances); spoofed
+  X-Forwarded-For no longer resets it (Vercel edge headers used; ERP_TRUST_PROXY=1 for other proxies).
+- Flask debugger off unless ERP_DEBUG=1.
+Money + stock
+- Void keeps the sale (VOIDED, out of takings) and returns exactly what the sale took, per the audit log.
+- Sale numbers are never reused (sqlite_sequence); checkout retries a number clash instead of saying "sold out".
+- Stock adjust is a relative, guarded update (no lost sales); PIN stock-out applies in one submit; Reason field.
+- Surcharge methods now charge the customer (added to total and paid); receipt shows the fee charged then.
+- Opening stock and qty edits on the product form are logged. Foreign keys enforced (PRAGMA foreign_keys).
+- Purge refused while a product is a set component. Product prices reject nan/inf/1e9; amounts rounded to 2dp.
+- Timestamps are shop-local (ERP_TZ, default Asia/Ulaanbaatar) instead of the server's UTC.
+- Held-cart resume survives malformed blobs.
+Speed + housekeeping
+- /sales paged (100/page), totals summed in SQL; cart and sets load in one query each.
+- search/leasing tests use a copy of erp.db (they used to write to the real one); pytest runs all suites;
+  tests/test_fixes.py covers every fix above. .env loader strips inline comments. README rewritten.
+
 ==== 2026-11-24: User accounts + roles (admin / cashier) ====
 - New users table (schema v6) + first-run seed: one admin account. Password comes from
 - Follow-up: Accounts rows now have discrete buttons (Change role / Reset password / Disable-Enable / Delete, guards on self-delete and last admin); new admin-only /logs audit page (who/what/why per stock move, searchable); removed the confusing "admin" topbar link and self-service /account page - admins reset any password incl. their own on Accounts; login/logout user chip is plain text now.
