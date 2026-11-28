@@ -18,7 +18,7 @@
   <tbody id="sales-rows"{% if not sales %} hidden{% endif %}>
   {% for s in sales %}
     <tr>
-      <td><a href="{{ url_for('receipt', sale_id=s['id']) }}">{{ s['ref'] }}</a></td>
+      <td><a href="{{ url_for('receipt', sale_id=s['id']) }}">{{ s['ref'] }}</a>{% if s['voided_at'] %} <span class="badge void">VOIDED</span>{% endif %}</td>
       <td class="muted">{{ s['created_at'] }}</td>
       <td class="num">{{ s['item_count'] }}</td>
       <td class="num">{{ s['total'] | money }}</td>
@@ -36,7 +36,7 @@
     </tr>
   {% endfor %}
   </tbody>
-  <tr class="sumrow"{% if not sales %} hidden{% endif %}><td colspan="3">Filtered total</td><td class="num" id="sales-total">{{ total | money }}</td><td colspan="3"></td></tr>
+  <tr class="sumrow"{% if not sales %} hidden{% endif %}><td colspan="3">Filtered total <span class="muted small">(voided sales excluded)</span></td><td class="num" id="sales-total">{{ total | money }}</td><td colspan="3"></td></tr>
 </table>
 
 <p class="muted" id="sales-empty"{% if sales %} hidden{% endif %}>
@@ -72,7 +72,7 @@
     ].filter(Boolean).join('');
     return `
       <tr>
-        <td><a href="/sales/${s.id}">${esc(s.ref)}</a></td>
+        <td><a href="/sales/${esc(s.id)}">${esc(s.ref)}</a>${s.voided ? ' <span class="badge void">VOIDED</span>' : ''}</td>
         <td class="muted">${esc(s.created_at)}</td>
         <td class="num">${esc(s.item_count)}</td>
         <td class="num">${fmt(s.total)}</td>

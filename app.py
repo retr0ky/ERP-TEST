@@ -39,6 +39,11 @@ CURRENCY = "₮"
 VAT_PERCENT = 10.0
 
 
+def now_local():
+    """Timestamp in the same text format SQLite's datetime() writes."""
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def money(value):
     """1900000 -> '1,900,000₮' ; 1900000.5 -> '1,900,000.50₮'"""
     value = value or 0
@@ -448,7 +453,7 @@ app.jinja_env.globals["asset_v"] = asset_v
 
 # Bump this whenever SCHEMA/migrations below change - it is what lets a hosted
 # database skip the whole migration crawl on boot (6.7s of round trips -> 2).
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -611,6 +616,8 @@ SALE_COLUMNS = [
     ("paid", "REAL NOT NULL DEFAULT 0"),
     ("change", "REAL NOT NULL DEFAULT 0"),
     ("n_search", "TEXT NOT NULL DEFAULT ''"),
+    ("voided_at", "TEXT"),
+    ("voided_by", "TEXT"),
 ]
 SALE_ITEM_COLUMNS = [
     ("set_id", "INTEGER REFERENCES sets(id) ON DELETE SET NULL"),
@@ -729,12 +736,17 @@ def sqllit(value):
     return "'" + str(value).replace("\x00", "").replace("'", "''") + "'"
 
 
+LOG_SQL = """INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
+             SELECT id, qty, qty + ?, ?, ?, ?, ? FROM products WHERE id = ?"""
+
+
+def log_params(pid, delta, reason, sale_id=None, who=None):
+    return (delta, delta, reason, who or actor(), sale_id, pid)
+
+
 def log_stock(conn, pid, delta, reason, sale_id=None):
     """One row per stock change: who, how much, why, when."""
-    conn.execute("""
-        INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
-        SELECT id, qty, qty + ?, ?, ?, ?, ? FROM products WHERE id = ?""",
-        (delta, delta, reason, actor(), sale_id, pid))
+    conn.execute(LOG_SQL, log_params(pid, delta, reason, sale_id))
 
 
 class DB:
@@ -2299,12 +2311,50 @@ def pos_checkout():
     conn = db()
     item_count = sum(q for _, q in entries) + sum(q for _, q in cart_sets)
     pm_map = payment_map()
-    # Sale id is chosen up front so the whole sale can travel in one script.
-    sale_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM sales").fetchone()[0]
-    ref = f"SALE-{sale_id:05d}"
-    # Every value below travels as a bound parameter. Nothing is formatted into SQL text.
     need_lines = list(need.items())
     who = actor()
+    for attempt in range(3):
+        # Sale id is chosen up front so the whole sale can travel in one script.
+        sale_id = next_sale_id(conn)
+        ref = f"SALE-{sale_id:05d}"
+        stmts = checkout_statements(sale_id, ref, entries, cart_sets, need_lines, pays, pm_map,
+                                    total, paid, vat, item_count, cust_phone, cust_note, who)
+        try:
+            conn.script(stmts)
+            break
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            msg = str(exc)
+            if "stock_guards" in msg:
+                flash(f"Cannot complete the sale: {sold_out_culprit(db(), need, entries, cart_sets)} "
+                      "was just sold out by another session. The cart is untouched - "
+                      "re-check stock and try again.", "error")
+            elif "sales" in msg and attempt < 2:
+                continue                     # another till took this number - take the next one
+            else:
+                flash("Could not save the sale - the cart is untouched, try again.", "error")
+            app.logger.warning("checkout aborted (sale %s): %s", ref, exc)
+            return pos_redirect(True)
+    session["cart"] = {}
+    session["sets"] = {}
+    session["payments"] = []
+    session["vat"] = False
+    session["customer"] = {}
+    flash(f"Sale {ref} recorded - {money(total)}.", "ok")
+    return redirect(url_for("receipt", sale_id=sale_id))
+
+
+def next_sale_id(conn):
+    """Never hand out a number twice - not even one whose sale was deleted by an
+    older build. sqlite_sequence remembers the highest id AUTOINCREMENT ever saw."""
+    seq = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'sales'").fetchone()
+    top = conn.execute("SELECT COALESCE(MAX(id), 0) FROM sales").fetchone()[0]
+    return max(int(seq[0]) if seq else 0, int(top or 0)) + 1
+
+
+def checkout_statements(sale_id, ref, entries, cart_sets, need_lines, pays, pm_map,
+                        total, paid, vat, item_count, cust_phone, cust_note, who):
+    """The whole sale as one script. Every value travels as a bound parameter."""
     stmts = []
     if need_lines:
         # One guard for the whole cart: it inserts a duplicate primary key the moment any
@@ -2345,23 +2395,7 @@ def pos_checkout():
     stmts.append(("""INSERT INTO payments (sale_id, method, amount, commission_percent,
                                           commission_mode, commission_amount, note, n_note)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", pay_rows))
-    try:
-        conn.script(stmts)
-    except sqlite3.IntegrityError as exc:
-        conn.rollback()
-        flash(f"Cannot complete the sale: {sold_out_culprit(db(), need, entries, cart_sets)} "
-              "was just sold out by another session. The cart is untouched - "
-              "re-check stock and try again.", "error")
-        if not DEBUG_MODE:
-            app.logger.warning("checkout aborted (sale %s): %s", ref, exc)
-        return pos_redirect(True)
-    session["cart"] = {}
-    session["sets"] = {}
-    session["payments"] = []
-    session["vat"] = False
-    session["customer"] = {}
-    flash(f"Sale {ref} recorded - {money(total)}.", "ok")
-    return redirect(url_for("receipt", sale_id=sale_id))
+    return stmts
 
 
 # ------------------------------------------------------------------- sales
@@ -2406,14 +2440,15 @@ def sales():
         split.setdefault(r["sale_id"], []).append(entry)
     for r in rows:
         r["split"] = ", ".join(split.get(r["id"], []))
-    total = sum(r["total"] for r in rows)
+    total = sum(r["total"] for r in rows if not r.get("voided_at"))   # voids are not takings
     if (request.args.get("format") == "json" or
             request.headers.get("X-Requested-With") == "xhr"):
         return jsonify(q=q, total=round(total, 2), rows=[
             {"id": r["id"], "ref": r["ref"], "created_at": r["created_at"],
              "item_count": r["item_count"], "total": round(r["total"], 2),
              "split": r["split"], "customer_phone": r["customer_phone"],
-             "customer_note": r["customer_note"]} for r in rows
+             "customer_note": r["customer_note"], "voided": bool(r.get("voided_at"))}
+            for r in rows
         ])
     return render_template("sales.html", sales=rows, total=total, q=q)
 
@@ -2437,28 +2472,65 @@ def receipt(sale_id):
                            vat=sale["vat_amount"] or 0, methods=methods)
 
 
+def stock_taken_by(conn, sale_id):
+    """{product_id: qty} the sale actually took out of stock.
+
+    The audit log is the truth: checkout writes one 'sale' row per product, sets
+    already broken into their components at the quantities sold. Older builds
+    deleted voided sales and reused their ids, so a 'sale voided' row may share
+    this id - netting both reasons cancels those leftovers out.
+    Sales older than the audit log fall back to their line items."""
+    logged = conn.execute("""SELECT COUNT(*) FROM inventory_logs
+                             WHERE sale_id = ? AND reason = 'sale'""", (sale_id,)).fetchone()[0]
+    if logged:
+        rows = conn.execute("""SELECT product_id, -SUM(delta) AS qty FROM inventory_logs
+                               WHERE sale_id = ? AND reason IN ('sale', 'sale voided')
+                                 AND product_id IS NOT NULL
+                               GROUP BY product_id""", (sale_id,)).fetchall()
+        return {r["product_id"]: r["qty"] for r in rows if r["qty"] > 0}
+    taken = {}
+    for it in conn.execute("SELECT product_id, set_id, qty FROM sale_items WHERE sale_id = ?",
+                           (sale_id,)).fetchall():
+        if it["product_id"] is not None:
+            taken[it["product_id"]] = taken.get(it["product_id"], 0) + it["qty"]
+        elif it["set_id"] is not None:
+            for c in conn.execute("SELECT product_id, qty FROM set_products WHERE set_id = ?",
+                                  (it["set_id"],)).fetchall():
+                taken[c["product_id"]] = taken.get(c["product_id"], 0) + it["qty"] * c["qty"]
+    return taken
+
+
 @app.route("/sales/<int:sale_id>/void", methods=["POST"])
 def sale_void(sale_id):
+    """A void keeps the sale (marked voided, out of the totals) and returns its stock."""
     conn = db()
     sale = conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
-    if sale:
-        for it in conn.execute("SELECT * FROM sale_items WHERE sale_id = ?",
-                               (sale_id,)).fetchall():
-            if it["product_id"] is not None:
-                log_stock(conn, it["product_id"], it["qty"], "sale voided", sale["id"])
-                conn.execute("UPDATE products SET qty = qty + ? WHERE id = ?",
-                             (it["qty"], it["product_id"]))
-            elif it["set_id"] is not None:
-                for c in set_components(conn, it["set_id"]):
-                    log_stock(conn, c["id"], it["qty"] * c["per_set"], "sale voided", sale["id"])
-                    conn.execute("UPDATE products SET qty = qty + ? WHERE id = ?",
-                                 (it["qty"] * c["per_set"], c["id"]))
-        conn.execute("DELETE FROM sale_items WHERE sale_id = ?", (sale_id,))
-        conn.execute("DELETE FROM payments WHERE sale_id = ?", (sale_id,))
-        conn.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
-        conn.commit()
-        flash(f"Sale {sale['ref']} voided and stock returned.", "ok")
-    return redirect(url_for("sales"))
+    if sale is None:
+        flash("Sale not found.", "error")
+        return redirect(url_for("sales"))
+    if sale["voided_at"]:
+        flash(f"Sale {sale['ref']} was already voided.", "error")
+        return redirect(url_for("receipt", sale_id=sale_id))
+    taken = stock_taken_by(conn, sale_id)
+    who = actor()
+    stmts = [
+        # Two admins voiding at once: the second hits the guard and changes nothing.
+        ("INSERT INTO stock_guards (id) SELECT 1 FROM sales WHERE id = ? AND voided_at IS NOT NULL",
+         (sale_id,)),
+        ("UPDATE sales SET voided_at = ?, voided_by = ? WHERE id = ?", (now_local(), who, sale_id)),
+    ]
+    if taken:
+        stmts.append((LOG_SQL, [log_params(pid, qty, "sale voided", sale_id, who)
+                                for pid, qty in taken.items()]))
+        stmts.append(("UPDATE products SET qty = qty + ? WHERE id = ?",
+                      [(qty, pid) for pid, qty in taken.items()]))
+    try:
+        conn.script(stmts)
+    except sqlite3.IntegrityError:
+        flash(f"Sale {sale['ref']} was already voided.", "error")
+        return redirect(url_for("receipt", sale_id=sale_id))
+    flash(f"Sale {sale['ref']} voided and stock returned.", "ok")
+    return redirect(url_for("receipt", sale_id=sale_id))
 
 
 # -------------------------------------------------- template globals

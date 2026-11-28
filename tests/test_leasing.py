@@ -90,8 +90,8 @@ chk(f"/sales/{sale['id']}" in srch, "sales search matches payment note")
 # 9. void restores stock and removes the test sale
 c.post(f"/sales/{sale['id']}/void", follow_redirects=True)
 conn2 = A.connect()
-chk(conn2.execute("SELECT COUNT(*) n FROM sales WHERE id=?", (sale["id"],)).fetchone()["n"] == 0,
-    "test sale voided")
+chk(conn2.execute("SELECT voided_at FROM sales WHERE id=?", (sale["id"],)).fetchone()["voided_at"],
+    "test sale voided (kept, marked voided)")
 now = conn2.execute("SELECT qty FROM products WHERE id=?", (prod["id"],)).fetchone()["qty"]
 conn2.close()
 chk(now >= prod["qty"], "stock restored after void", f"{prod['qty']} -> {now}")

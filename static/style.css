@@ -120,6 +120,7 @@ a:hover { text-decoration: underline; }
 }
 .badge.admin { color: var(--on-accent); background: linear-gradient(135deg, var(--red), var(--red-deep)); border-color: transparent; }
 .badge.cashier { color: var(--amber); background: rgba(var(--amber-rgb), .12); }
+.badge.void { color: var(--red-hot); border-color: currentColor; }
 /* ---- Accounts: same control metrics as the inventory acts grid (27px) ---- */
 .accounts .w-accuser { width: 138px; }
 .accounts .w-accrole { width: 78px; }

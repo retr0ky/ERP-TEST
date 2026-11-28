@@ -8,7 +8,7 @@
       <button class="btn" onclick="window.print()">Print</button>
       <a class="btn ghost" href="{{ url_for('sales') }}">All sales</a>
       <a class="btn ghost" href="{{ url_for('pos') }}">New sale</a>
-      {% if is_admin %}
+      {% if is_admin and not sale['voided_at'] %}
       <form method="post" action="{{ url_for('sale_void', sale_id=sale['id']) }}" class="inline"
             data-confirm="1">
 {{ csrf_field }}
@@ -18,6 +18,9 @@
     </div>
   </div>
   <p class="muted">{{ sale['created_at'] }}</p>
+  {% if sale['voided_at'] %}
+    <div class="flash error voided">VOIDED {{ sale['voided_at'] }} by {{ sale['voided_by'] or '?' }} - stock was returned; this sale is not counted in takings.</div>
+  {% endif %}
   {% if sale['customer_phone'] or sale['customer_note'] %}
     <div class="custinfo">
       {% if sale['customer_phone'] %}
