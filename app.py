@@ -236,16 +236,18 @@ def csrf_gate():
     session token must come back on every mutating request (form field or header)."""
     if "csrf" not in session:
         session["csrf"] = secrets.token_hex(16)
+    # The token check comes first and applies to admin routes too - an admin
+    # session must never be able to delete or void on a forged request.
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        sent = request.form.get("csrf") or request.headers.get("X-CSRF-Token") or ""
+        if not hmac.compare_digest(sent, session.get("csrf", "")):
+            msg = "Session expired - reload the page and try again."
+            if wants_json():
+                return jsonify(ok=False, error=msg), 400
+            return render_template("error.html", msg=msg), 400
     if request.endpoint in ADMIN_ONLY:
         return admin_gate()
-    if request.method in ("GET", "HEAD", "OPTIONS"):
-        return None
-    sent = request.form.get("csrf") or request.headers.get("X-CSRF-Token") or ""
-    if not hmac.compare_digest(sent, session.get("csrf", "")):
-        msg = "Session expired - reload the page and try again."
-        if wants_json():
-            return jsonify(ok=False, error=msg), 400
-        return render_template("error.html", msg=msg), 400
+    return None
 
 
 def is_admin():
