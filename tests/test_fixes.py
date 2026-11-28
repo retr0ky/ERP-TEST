@@ -276,6 +276,22 @@ chk(row is not None and tuple(row) == (1900000.0, 12.5), "1,900,000 and 12.5 are
     tuple(row) if row else None)
 
 
+# ------------------------------------------------------------ sales paging
+A.SALES_PAGE = 3
+c = client()
+all_ = q1("SELECT COUNT(*) AS n, SUM(CASE WHEN voided_at IS NULL THEN total END) AS t FROM sales")
+d = c.get("/sales?format=json").get_json()
+chk(len(d["rows"]) == 3 and d["count"] == all_["n"] and d["pages"] > 1,
+    "sales list is paged, count covers every sale", (len(d["rows"]), d["count"], d["pages"]))
+chk(abs(d["total"] - all_["t"]) < 0.01, "takings total covers every page, not just this one")
+d2 = c.get(f"/sales?format=json&page={d['pages']}").get_json()
+chk(d2["page"] == d["pages"] and d2["rows"] and d2["rows"][0]["id"] < d["rows"][-1]["id"],
+    "last page holds the oldest sales")
+html = c.get("/sales?page=2").get_data(as_text=True)
+chk("page 2 of" in html and "Older" in html and "Newer" in html, "pager links render")
+A.SALES_PAGE = 100
+
+
 # --------------------------------------------------------------------------- done
 print("\nFAILS:", fails or "none")
 sys.exit(1 if fails else 0)

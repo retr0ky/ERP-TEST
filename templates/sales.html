@@ -42,6 +42,11 @@
 <p class="muted" id="sales-empty"{% if sales %} hidden{% endif %}>
   {% if q %}No sales match "{{ q }}".{% else %}No sales recorded yet.{% endif %}
 </p>
+<p class="muted small pager" id="sales-pager"{% if pages <= 1 %} hidden{% endif %}>
+  <span id="sales-pager-text">{{ count }} sales - page {{ page }} of {{ pages }}</span>
+  <a class="btn tiny ghost" id="sales-newer" href="{{ url_for('sales', q=q or None, page=page - 1) }}"{% if page <= 1 %} hidden{% endif %}>Newer</a>
+  <a class="btn tiny ghost" id="sales-older" href="{{ url_for('sales', q=q or None, page=page + 1) }}"{% if page >= pages %} hidden{% endif %}>Older</a>
+</p>
 
 <script>
 (function () {
@@ -82,10 +87,26 @@
       </tr>`;
   }
 
+  // live search always shows page 1; Older/Newer are plain links with the query kept
+  function paintPager(target, d) {
+    const pager = document.getElementById('sales-pager');
+    if (!pager) return;
+    pager.hidden = !(d.pages > 1);
+    document.getElementById('sales-pager-text').textContent =
+      `${d.count} sales - page ${d.page} of ${d.pages}`;
+    const link = (n) => `{{ url_for('sales') }}?${new URLSearchParams(
+      Object.assign(target ? { q: target } : {}, { page: String(n) }))}`;
+    const newer = document.getElementById('sales-newer');
+    const older = document.getElementById('sales-older');
+    newer.hidden = d.page <= 1; newer.href = link(d.page - 1);
+    older.hidden = d.page >= d.pages; older.href = link(d.page + 1);
+  }
+
   function setUrl(q) {
     const url = new URL(window.location);
     if (q) url.searchParams.set('q', q);
     else url.searchParams.delete('q');
+    url.searchParams.delete('page');
     history.replaceState(null, '', url);
   }
 
@@ -106,6 +127,7 @@
       emptyEl.hidden = rows.length > 0;
       emptyEl.textContent = target ? `No sales match "${target}".` : 'No sales recorded yet.';
       totalEl.textContent = fmt(d.total || 0);
+      paintPager(target, d);
     } catch (err) {
       emptyEl.hidden = false;
       emptyEl.textContent = 'Search failed - try again.';

@@ -1677,15 +1677,20 @@ def cart_entries():
     cart = session.get("cart", {})
     entries = []
     clean = {}
-    conn = db()
     for pid, qty in cart.items():
         pid_i, qty_i = to_int(pid), to_int(qty)
         if pid_i is None or qty_i is None or qty_i <= 0:
             continue                                  # junk written into the session
-        qty_i = min(qty_i, MAX_QTY_PER_LINE)
-        clean[str(pid_i)] = qty_i
-        p = conn.execute("SELECT * FROM products WHERE id = ? AND active = 1",
-                         (pid_i,)).fetchone()
+        clean[str(pid_i)] = min(qty_i, MAX_QTY_PER_LINE)
+    # one round trip for the whole cart, not one per line (each is a Turso request)
+    found = {}
+    if clean:
+        marks = ",".join("?" for _ in clean)
+        found = {r["id"]: r for r in db().execute(
+            f"SELECT * FROM products WHERE active = 1 AND id IN ({marks})",
+            tuple(int(k) for k in clean)).fetchall()}
+    for key, qty_i in clean.items():
+        p = found.get(int(key))
         if p is None:
             continue                                  # deleted or retired since it was added
         row = dict(p)
@@ -1732,18 +1737,31 @@ def set_entries():
     conn = db()
     out = []
     total = 0.0
+    wanted = {}
     for sid, qty in list(session.get("sets", {}).items()):
-        try:
-            sid = int(sid)
-            qty = int(qty)
-        except (TypeError, ValueError):
-            continue
-        if qty <= 0:
-            continue
-        s = conn.execute("SELECT * FROM sets WHERE id = ? AND active = 1", (sid,)).fetchone()
+        sid_i, qty_i = to_int(sid), to_int(qty)
+        if sid_i is not None and qty_i is not None and qty_i > 0:
+            wanted[sid_i] = qty_i
+    if not wanted:
+        return out, 0.0
+    # two round trips for every set in the cart instead of two per set
+    marks = ",".join("?" for _ in wanted)
+    found = {r["id"]: r for r in conn.execute(
+        f"SELECT * FROM sets WHERE active = 1 AND id IN ({marks})", tuple(wanted)).fetchall()}
+    comps_by_set = {}
+    for r in conn.execute(
+            f"""SELECT sp.set_id, p.id, p.name, p.price, p.qty AS stock, sp.qty AS per_set,
+                       p.category_id AS category_id
+                FROM set_products sp JOIN products p ON p.id = sp.product_id
+                WHERE sp.set_id IN ({marks}) AND p.active = 1
+                ORDER BY p.name""", tuple(wanted)).fetchall():
+        c = dict(r)
+        comps_by_set.setdefault(c.pop("set_id"), []).append(c)
+    for sid, qty in wanted.items():
+        s = found.get(sid)
         if s is None:
             continue
-        comps = set_components(conn, sid)
+        comps = comps_by_set.get(sid, [])
         s = dict(s)
         s["unit_price"], s["base_price"] = set_price_of(s, comps)
         s["components"] = comps
@@ -2409,8 +2427,9 @@ def pos_checkout():
               + " - which leasing app or provider did the client use?", "error")
         return pos_redirect(True)
     need, cart_errors, _, shortages = cart_requirements(entries, cart_sets)
-    broken = [f"{s['name']} - component missing: {', '.join(missing_set_components(db(), s['id']))}"
-              for s, _ in cart_sets if missing_set_components(db(), s["id"])]
+    gone = {s["id"]: missing_set_components(db(), s["id"]) for s, _ in cart_sets}
+    broken = [f"{s['name']} - component missing: {', '.join(gone[s['id']])}"
+              for s, _ in cart_sets if gone[s["id"]]]
     cart_errors += broken
     if cart_errors or shortages:
         if cart_errors:
@@ -2521,13 +2540,20 @@ def checkout_statements(sale_id, ref, entries, cart_sets, need_lines, pays, pm_m
 
 
 # ------------------------------------------------------------------- sales
+SALES_PAGE = int(os.environ.get("ERP_SALES_PAGE") or 100)
+
+
 @app.route("/sales")
 def sales():
+    """One page of sales at a time; count and takings are summed in SQL over every
+    match, so the page stays fast and the total stays right as history grows."""
     methods = {r["key"]: r["label"] for r in payment_rows()}
     q = request.args.get("q", "").strip()
+    page = max(to_int(request.args.get("page")) or 1, 1)
+    where, args = "1 = 1", []
     if q:
         head = ["sales.n_search"]
-        clauses, args = [], []
+        clauses = []
         for word in query_words(q):
             clause, extra = match_any(head, word)
             like = like_terms(word)
@@ -2540,15 +2566,26 @@ def sales():
                      "               AND si.n_name LIKE ? ESCAPE '\\')")
             clauses.append(f"({group})")
             args += extra + [like, like]
-        rows = [dict(r) for r in db().execute(
-            "SELECT * FROM sales WHERE " + " AND ".join(clauses) + " ORDER BY id DESC",
-            args).fetchall()]
-    else:
-        rows = [dict(r) for r in db().execute("SELECT * FROM sales ORDER BY id DESC")]
-    pays = db().execute(
-        """SELECT sale_id, method, amount, commission_amount, commission_mode, note
-           FROM payments ORDER BY id""").fetchall()
+        if clauses:
+            where = " AND ".join(clauses)
+    agg = db().execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN voided_at IS NULL THEN total END), 0) AS t"
+        " FROM sales WHERE " + where, args).fetchone()
+    count, total = agg["n"], agg["t"]
+    pages = max((count + SALES_PAGE - 1) // SALES_PAGE, 1)
+    page = min(page, pages)
+    rows = [dict(r) for r in db().execute(
+        "SELECT * FROM sales WHERE " + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
+        args + [SALES_PAGE, (page - 1) * SALES_PAGE]).fetchall()]
     split = {}
+    if rows:
+        slots = ",".join("?" for _ in rows)
+        pays = db().execute(
+            f"""SELECT sale_id, method, amount, commission_amount, commission_mode, note
+                FROM payments WHERE sale_id IN ({slots}) ORDER BY id""",
+            tuple(r["id"] for r in rows)).fetchall()
+    else:
+        pays = []
     for r in pays:
         label = methods.get(r["method"], r["method"])
         if r["commission_mode"] == "SURCHARGE" and r["commission_amount"]:
@@ -2562,17 +2599,17 @@ def sales():
         split.setdefault(r["sale_id"], []).append(entry)
     for r in rows:
         r["split"] = ", ".join(split.get(r["id"], []))
-    total = sum(r["total"] for r in rows if not r.get("voided_at"))   # voids are not takings
     if (request.args.get("format") == "json" or
             request.headers.get("X-Requested-With") == "xhr"):
-        return jsonify(q=q, total=round(total, 2), rows=[
+        return jsonify(q=q, total=round(total, 2), count=count, page=page, pages=pages, rows=[
             {"id": r["id"], "ref": r["ref"], "created_at": r["created_at"],
              "item_count": r["item_count"], "total": round(r["total"], 2),
              "split": r["split"], "customer_phone": r["customer_phone"],
              "customer_note": r["customer_note"], "voided": bool(r.get("voided_at"))}
             for r in rows
         ])
-    return render_template("sales.html", sales=rows, total=total, q=q)
+    return render_template("sales.html", sales=rows, total=total, q=q,
+                           count=count, page=page, pages=pages)
 
 
 @app.route("/sales/<int:sale_id>")
