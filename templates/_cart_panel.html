@@ -137,6 +137,7 @@
               <span id="t-vat">{% if vat %}{{ vat | money }}{% endif %}</span>
             </label>
           </form>
+          <div class="payrow"{% if not surcharge %} hidden{% endif %}><span>Surcharge</span><span id="t-fee">{{ surcharge | money }}</span></div>
           <div class="payrow"><span>Total</span><span class="grand" id="t-total">{{ total | money }}</span></div>
           <div class="payrow"{% if paid <= 0 %} hidden{% endif %}><span>Paid</span><span id="t-paid">{{ paid | money }}</span></div>
           <div class="payrow due"{% if balance <= 0 %} hidden{% endif %}><span>Balance due</span><span id="t-balance">{{ balance | money }}</span></div>

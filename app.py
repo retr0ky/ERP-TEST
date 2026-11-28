@@ -1054,10 +1054,20 @@ def vat_of(goods_total):
     return round(goods_total * VAT_PERCENT / 100.0, 2)
 
 
+def surcharge_total(pays):
+    """Fees the customer pays on top for SURCHARGE methods (e.g. card +2%)."""
+    pm = payment_map()
+    return round(sum(surcharge_of(pm.get(p["method"]), p["amount"]) for p in pays), 2)
+
+
 def pay_totals(conn, pays, goods_total):
+    """A surcharge rides on its payment line: the line's amount covers goods + VAT,
+    the fee is charged on top. So it is added to both the total and what was paid,
+    and the balance (what is still owed for the goods) does not move."""
     vat = vat_of(goods_total)
-    total = round(goods_total + vat, 2)
-    paid = round(sum(p["amount"] for p in pays), 2)
+    fee = surcharge_total(pays)
+    total = round(goods_total + vat + fee, 2)
+    paid = round(sum(p["amount"] for p in pays) + fee, 2)
     return total, paid, vat
 
 
@@ -1599,7 +1609,7 @@ def cart_context():
     return dict(cart=entries, cart_sets=cart_sets, total=total, goods_total=goods_total,
                 vat=vat, short={s["id"]: s for s in shortages}, cart_errors=cart_errors,
                 pays=pays, paid=paid, balance=max(total - paid, 0), change=max(paid - total, 0),
-                held=held, customer=customer_data(),
+                held=held, customer=customer_data(), surcharge=surcharge_total(pays),
                 q=(request.values.get("q") or "").strip(),
                 cat=to_int(request.values.get("cat")),
                 browse=(request.values.get("browse") or "").strip() == "1",
@@ -1880,7 +1890,11 @@ def pos():
                            sold_out=[r["name"] for r in sold_out], q=q, cat=cat_id,
                            pays=pays, paid=paid, balance=max(total - paid, 0),
                            change=max(paid - total, 0), categories=chips, held=held,
-                           customer=customer_data(),
+                           customer=customer_data(), surcharge=surcharge_total(pays),
+                           surcharge_rates={r["key"]: r["commission_percent"]
+                                            for r in payment_rows(active_only=True)
+                                            if r["commission_mode"] == "SURCHARGE"
+                                            and r["commission_percent"]},
                            open_pay=request.args.get("open") == "1",
                            pay_methods=payment_rows(active_only=True),
                            NOTE_KEYS=[r["key"] for r in payment_rows(active_only=True)
@@ -2261,6 +2275,7 @@ def pay_state(pays, goods_total):
                       "api": f"/pos/api/pay/remove/{i}"})
     missing_note = any(l["needs_note"] for l in lines)
     return {"ok": True, "goods": round(goods_total, 2), "vat": vat, "total": total,
+            "surcharge": surcharge_total(pays),
             "paid": paid, "balance": max(round(total - paid, 2), 0.0),
             "change": max(round(paid - total, 2), 0.0), "lines": lines,
             "can_complete": bool(pays) and (total - paid) <= 0.004 and not missing_note}
@@ -2536,7 +2551,9 @@ def receipt(sale_id):
                         (sale_id,)).fetchall()
     methods = {r["key"]: dict(r) for r in payment_rows()}
     commission = round(sum(p["commission_amount"] or 0 for p in pays), 2)
-    surcharge = round(sum(surcharge_of(methods.get(p["method"]), p["amount"]) for p in pays), 2)
+    # what the customer was actually charged then, not today's method settings
+    surcharge = round(sum(p["commission_amount"] or 0 for p in pays
+                          if p["commission_mode"] == "SURCHARGE"), 2)
     return render_template("receipt.html", sale=sale, items=items, pays=pays,
                            commission=commission, surcharge=surcharge,
                            vat=sale["vat_amount"] or 0, methods=methods)

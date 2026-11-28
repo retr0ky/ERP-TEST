@@ -417,15 +417,21 @@ function initPay() {
     return neg + group(parts[0]) + (parts[1] ? '.' + parts[1] : '') + CUR;
   };
   const VATP = {{ VAT_PERCENT | tojson }};
+  // percent per SURCHARGE method - the fee is charged on top of its payment line
+  const SURCH = {{ surcharge_rates | tojson }};
   let VAT = {{ (vat > 0) | tojson }};
   const totals = (pays) => {
-    let paid = 0;
-    pays.forEach((p) => { paid += p.amount; });
-    paid = r2(paid);
+    let paid = 0, fee = 0;
+    pays.forEach((p) => {
+      paid += p.amount;
+      if (SURCH[p.method]) fee += r2(p.amount * SURCH[p.method] / 100);
+    });
+    fee = r2(fee);
+    paid = r2(paid + fee);
     const goods = goodsNow();
     const vat = VAT ? r2(goods * VATP / 100) : 0;
-    const total = r2(goods + vat);
-    return { goods, vat, total, paid, balance: r2(total - paid), change: r2(paid - total) };
+    const total = r2(goods + vat + fee);
+    return { goods, vat, fee, total, paid, balance: r2(total - paid), change: r2(paid - total) };
   };
   const paintVat = (vat) => {
     const v = document.getElementById('t-vat');
@@ -461,6 +467,7 @@ function initPay() {
     document.getElementById('t-goods').textContent = fmt(base.goods);
     paintVat(base.vat);
     document.getElementById('t-total').textContent = fmt(base.total);
+    show('t-fee', fmt(base.fee), base.fee <= 0.004);
     show('t-paid', fmt(live.paid), live.paid <= 0.004);
     show('t-balance', fmt(live.balance), live.balance <= 0.004);
     show('t-change', fmt(live.change), live.change <= 0.004);
@@ -581,6 +588,7 @@ function initPay() {
     const p = document.getElementById('t-paid');
     if (g) g.textContent = fmt(d.goods);
     paintVat(d.vat);
+    show('t-fee', fmt(d.surcharge || 0), !(d.surcharge > 0.004));
     if (t) t.textContent = fmt(d.total);
     show('t-paid', fmt(d.paid), d.paid <= 0.004);
     show('t-balance', fmt(d.balance), d.balance <= 0.004);

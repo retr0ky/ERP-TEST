@@ -197,6 +197,27 @@ chk(q1("SELECT COUNT(*) FROM login_throttle")[0] >= 1, "lockout state lives in t
 run("DELETE FROM login_throttle")
 
 
+# ------------------------------------------------------------ card surcharge is charged
+run("UPDATE payment_methods SET commission_percent = 2, commission_mode = 'SURCHARGE' WHERE key = 'card'")
+ps = product("Surcharge Widget", 3, price=100000.0)
+c = client(cart={str(ps): 1})
+d = post(c, "/pos/api/pay/exact", {"method": "card"}).get_json()
+chk(d["ok"] and abs(d["surcharge"] - 2000) < 0.01 and abs(d["total"] - 102000) < 0.01
+    and d["can_complete"], "card +2%: total 102,000, surcharge shown, sale completes",
+    {k: d.get(k) for k in ("surcharge", "total", "paid", "balance")})
+page = c.get("/pos?open=1").get_data(as_text=True)
+chk('"card": 2' in page.replace(".0", "") and "t-fee" in page, "POS page knows the surcharge rate")
+r = post(c, "/pos/checkout")
+sid = int(r.headers["Location"].rsplit("/", 1)[1])
+row = q1("SELECT total, paid, change FROM sales WHERE id=?", (sid,))
+chk(tuple(row) == (102000.0, 102000.0, 0.0), "sale stores the surcharged total", tuple(row))
+rc = client().get(f"/sales/{sid}").get_data(as_text=True)
+chk("Customer surcharge" in rc and "100,000₮" in rc, "receipt: goods 100,000 + surcharge line")
+run("UPDATE payment_methods SET commission_percent = 0, commission_mode = 'ABSORBED' WHERE key = 'card'")
+rc = client().get(f"/sales/{sid}").get_data(as_text=True)
+chk("Customer surcharge" in rc, "receipt keeps the surcharge after the rate is changed")
+
+
 # --------------------------------------------------------------------------- done
 print("\nFAILS:", fails or "none")
 sys.exit(1 if fails else 0)
