@@ -7,7 +7,8 @@
     Enter the manager PIN to unlock the admin tier for {{ admin_window // 60 }} minutes,
     or log in as an admin.</p>
 {{ csrf_field }}
-  {% for key, value in form.items() %}{% if key != 'csrf' %}
+  {% if pin_error %}<div class="flash error">{{ pin_error }}</div>{% endif %}
+  {% for key, value in form.items() %}{% if key not in ('csrf', 'admin_pin') %}
   <input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
   <input type="password" name="admin_pin" id="admin_pin" autocomplete="off" autofocus
          placeholder="Manager PIN" maxlength="32">

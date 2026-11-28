@@ -145,6 +145,58 @@ got = [q1("SELECT qty FROM products WHERE id=?", (x,))[0] for x in (pa, pb, pc)]
 chk(got == [10, 10, 10], "set void returns exactly what was sold, not the edited set", got)
 
 
+# ------------------------------------------------------------ stock adjust
+pq = product("Adjust Widget", 5)
+r = post(client(), f"/inventory/{pq}/adjust", {"direction": "in", "qty": "3", "reason": "delivery"})
+chk(q1("SELECT qty FROM products WHERE id=?", (pq,))[0] == 8, "stock in adds")
+log = q1("SELECT old_qty, new_qty, delta, reason FROM inventory_logs WHERE product_id=? "
+         "ORDER BY id DESC", (pq,))
+chk(tuple(log) == (5, 8, 3, "delivery"), "adjust is logged with the typed reason", tuple(log))
+# a sale lands after the form loaded (stock 8 -> 6); the adjust must not overwrite it
+run("UPDATE products SET qty = qty - 2 WHERE id = ?", (pq,))
+post(client(), f"/inventory/{pq}/adjust", {"direction": "in", "qty": "1"})
+chk(q1("SELECT qty FROM products WHERE id=?", (pq,))[0] == 7, "adjust is relative (6 + 1 = 7)")
+r = post(client(), f"/inventory/{pq}/adjust", {"direction": "out", "qty": "50"})
+chk(q1("SELECT qty FROM products WHERE id=?", (pq,))[0] == 7, "cannot take out more than stock")
+cash = client(admin=False)
+r = post(cash, f"/inventory/{pq}/adjust", {"direction": "out", "qty": "2"})
+chk(r.status_code == 401 and q1("SELECT qty FROM products WHERE id=?", (pq,))[0] == 7,
+    "cashier stock-out asks for the PIN")
+r = post(cash, f"/inventory/{pq}/adjust", {"direction": "out", "qty": "2", "admin_pin": "4321"})
+chk(q1("SELECT qty FROM products WHERE id=?", (pq,))[0] == 5,
+    "correct PIN applies the stock-out on the same submit")
+
+# ------------------------------------------------------------ manager PIN
+pz = product("Pin Widget", 1)
+cash = client(admin=False)
+r = post(cash, f"/inventory/{pz}/delete", {"admin_pin": "adminpass"})
+chk(r.status_code == 401, "admin login password is not the manager PIN when ERP_MANAGER_PIN is set")
+page = r.get_data(as_text=True)
+chk("adminpass" not in page and "Wrong PIN" in page, "wrong PIN is reported and not echoed back")
+r = cash.post(f"/inventory/{pz}/delete?admin_pin=4321", headers={"X-CSRF-Token": "tok"})
+chk(r.status_code == 401, "PIN in the query string is ignored")
+for _ in range(A.LOGIN_MAX_FAILS):
+    post(cash, f"/inventory/{pz}/delete", {"admin_pin": "0000"})
+r = post(cash, f"/inventory/{pz}/delete", {"admin_pin": "4321"})
+chk(r.status_code == 401 and "Too many wrong PINs" in r.get_data(as_text=True),
+    "PIN guessing is locked out, even the right PIN waits")
+run("DELETE FROM login_throttle")
+
+# ------------------------------------------------------------ login lockout
+anon = A.app.test_client()
+anon.get("/login")
+with anon.session_transaction() as s_:
+    tok = s_.get("csrf", "")
+for i in range(A.LOGIN_MAX_FAILS):
+    anon.post("/login", data={"username": "admin", "password": "nope", "csrf": tok},
+              headers={"X-Forwarded-For": f"10.0.0.{i}"})
+r = anon.post("/login", data={"username": "admin", "password": "nope", "csrf": tok},
+              headers={"X-Forwarded-For": "10.9.9.9"})
+chk(r.status_code == 429, "spoofed X-Forwarded-For does not reset the login lockout", r.status_code)
+chk(q1("SELECT COUNT(*) FROM login_throttle")[0] >= 1, "lockout state lives in the database")
+run("DELETE FROM login_throttle")
+
+
 # --------------------------------------------------------------------------- done
 print("\nFAILS:", fails or "none")
 sys.exit(1 if fails else 0)

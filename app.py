@@ -94,30 +94,65 @@ def wants_json():
 LOGIN_MAX_FAILS = int(os.environ.get("ERP_LOGIN_MAX_FAILS") or 5)
 LOGIN_WINDOW = int(os.environ.get("ERP_LOGIN_WINDOW") or 300)
 LOGIN_LOCK_BASE = int(os.environ.get("ERP_LOGIN_LOCK_SECONDS") or 30)
-LOGIN_LOCKS = {}          # remote addr -> (fails, window_started, locked_until)
+LOCK_CAP = 3600           # never lock anyone out for more than an hour at a time
 
 
-def login_lockout(ip):
-    """Seconds left on a lockout, or None when the caller may try."""
-    fails, started, locked = LOGIN_LOCKS.get(ip, (0, 0.0, 0.0))
+def client_ip():
+    """The caller's address for throttling.
+
+    X-Forwarded-For is whatever the client typed, so it is never trusted by itself.
+    On Vercel the edge overwrites X-Real-IP / X-Vercel-Forwarded-For with the real
+    address; behind another proxy set ERP_TRUST_PROXY=1 to use the last hop it added."""
+    if os.environ.get("VERCEL"):
+        for header in ("X-Vercel-Forwarded-For", "X-Real-IP"):
+            value = (request.headers.get(header) or "").split(",")[0].strip()
+            if value:
+                return value
+    if os.environ.get("ERP_TRUST_PROXY") == "1":
+        hops = [h.strip() for h in (request.headers.get("X-Forwarded-For") or "").split(",")]
+        if hops and hops[-1]:
+            return hops[-1]
+    return request.remote_addr or "?"
+
+
+def throttle_left(key):
+    """Seconds left on a lockout, or None when the caller may try.
+
+    Kept in the database, not in memory: on Vercel every cold start and every
+    parallel instance would otherwise hand an attacker a fresh set of tries."""
+    row = db().execute("SELECT locked FROM login_throttle WHERE key = ?", (key,)).fetchone()
     now = time.time()
-    if locked and now < locked:
-        return int(locked - now) + 1
-    if fails and now - started > LOGIN_WINDOW:
-        LOGIN_LOCKS[ip] = (0, now, 0.0)
+    if row is not None and row["locked"] and now < row["locked"]:
+        return int(row["locked"] - now) + 1
     return None
 
 
-def login_failed(ip):
-    fails, started, _ = LOGIN_LOCKS.get(ip, (0, 0.0, 0.0))
+def throttle_fail(key):
+    d = db()
+    row = d.execute("SELECT fails, started FROM login_throttle WHERE key = ?", (key,)).fetchone()
     now = time.time()
+    fails, started = (row["fails"], row["started"]) if row is not None else (0, now)
     if now - started > LOGIN_WINDOW:
         fails, started = 0, now
     fails += 1
-    locked = now + LOGIN_LOCK_BASE * 2 ** (fails - LOGIN_MAX_FAILS) if fails >= LOGIN_MAX_FAILS else 0.0
-    LOGIN_LOCKS[ip] = (fails, started, locked)
-    app.logger.warning("failed login from %s (attempt %d in %ds window)", ip, fails, LOGIN_WINDOW)
+    locked = 0.0
+    if fails >= LOGIN_MAX_FAILS:
+        locked = now + min(LOGIN_LOCK_BASE * 2 ** min(fails - LOGIN_MAX_FAILS, 12), LOCK_CAP)
+    d.execute("INSERT INTO login_throttle (key, fails, started, locked) VALUES (?, ?, ?, ?)"
+              " ON CONFLICT(key) DO UPDATE SET fails = excluded.fails,"
+              " started = excluded.started, locked = excluded.locked",
+              (key, fails, started, locked))
+    # old rows would pile up forever otherwise
+    d.execute("DELETE FROM login_throttle WHERE started < ? AND locked < ?",
+              (now - 86400, now))
+    d.commit()
+    app.logger.warning("failed attempt for %s (%d in %ds window)", key, fails, LOGIN_WINDOW)
     return locked
+
+
+def throttle_clear(key):
+    db().execute("DELETE FROM login_throttle WHERE key = ?", (key,))
+    db().commit()
 
 
 # ------------------------------------------------------------------- accounts
@@ -184,8 +219,8 @@ def login_gate():
 def login():
     nxt = safe_next(request.args.get("nxt")) or url_for("pos")
     if request.method == "POST":
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
-        left = login_lockout(ip)
+        ip = "login:" + client_ip()
+        left = throttle_left(ip)
         if left:
             app.logger.warning("login throttled for %s - %ds left", ip, left)
             flash(f"Too many wrong logins. Try again in {left}s.", "error")
@@ -195,7 +230,7 @@ def login():
         row = db().execute("SELECT id, username, role, pass_hash FROM users"
                            " WHERE username = ? AND active = 1", (username,)).fetchone()
         if row is not None and check_password_hash(row["pass_hash"], password):
-            LOGIN_LOCKS.pop(ip, None)
+            throttle_clear(ip)
             session.clear()
             session["authed"] = True
             session["uid"] = row["id"]
@@ -209,7 +244,7 @@ def login():
                          (row["id"],))
             db().commit()
             return redirect(safe_next(request.form.get("nxt")) or nxt)
-        login_failed(ip)
+        throttle_fail(ip)
         flash("Wrong username or password.", "error")
     return render_template("login.html", nxt=nxt)
 
@@ -223,7 +258,13 @@ def logout():
 
 
 # ------------------------------------------------- CSRF + admin PIN (tier 2)
-ADMIN_PASSWORD = os.environ.get("ERP_ADMIN_PASSWORD") or ""
+# The manager PIN is its own secret. Older setups only had ERP_ADMIN_PASSWORD (which is
+# also the seeded admin's login password); it still works as the PIN until a separate
+# ERP_MANAGER_PIN is set, with a warning, so an existing shop keeps working.
+ADMIN_PASSWORD = os.environ.get("ERP_MANAGER_PIN") or os.environ.get("ERP_ADMIN_PASSWORD") or ""
+if ADMIN_PASSWORD and not os.environ.get("ERP_MANAGER_PIN"):
+    app.logger.warning("manager PIN falls back to ERP_ADMIN_PASSWORD - set ERP_MANAGER_PIN "
+                       "so the PIN is not also the admin account's password")
 ADMIN_WINDOW = int(os.environ.get("ERP_ADMIN_WINDOW") or 900)
 MAX_CART_LINES = int(os.environ.get("ERP_MAX_CART_LINES") or 60)
 MAX_QTY_PER_LINE = int(os.environ.get("ERP_MAX_QTY_PER_LINE") or 999)
@@ -268,15 +309,26 @@ def admin_gate():
     """None when the caller may proceed, otherwise the PIN prompt to render."""
     if is_admin():
         return None
-    sent = request.values.get("admin_pin") or request.headers.get("X-Admin-Pin") or ""
-    if sent and hmac.compare_digest(sent, ADMIN_PASSWORD):
-        session["admin_until"] = time.time() + ADMIN_WINDOW
-        return None
+    # Body or header only - a PIN in the query string ends up in logs and history.
+    sent = request.form.get("admin_pin") or request.headers.get("X-Admin-Pin") or ""
     msg = "Admin PIN required for this action."
+    if sent and ADMIN_PASSWORD:
+        user = current_user()
+        key = f"pin:{user['id'] if user is not None else client_ip()}"
+        left = throttle_left(key)
+        if left:
+            msg = f"Too many wrong PINs. Try again in {left}s."
+        elif hmac.compare_digest(sent.encode(), ADMIN_PASSWORD.encode()):
+            throttle_clear(key)
+            session["admin_until"] = time.time() + ADMIN_WINDOW
+            return None
+        else:
+            throttle_fail(key)
+            msg = "Wrong PIN."
     if wants_json():
         # API / fetch callers must get JSON - a PIN form in an AJAX response is a parse error.
         return jsonify(ok=False, error=msg, code="ADMIN_REQUIRED"), 401
-    return render_template("admin_pin.html", form=dict(request.form),
+    return render_template("admin_pin.html", form=dict(request.form), pin_error=sent and msg,
                            back=request.path, admin_window=ADMIN_WINDOW), 401
 
 
@@ -453,7 +505,7 @@ app.jinja_env.globals["asset_v"] = asset_v
 
 # Bump this whenever SCHEMA/migrations below change - it is what lets a hosted
 # database skip the whole migration crawl on boot (6.7s of round trips -> 2).
-SCHEMA_VERSION = "7"
+SCHEMA_VERSION = "8"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -563,6 +615,12 @@ CREATE TABLE IF NOT EXISTS inventory_logs (
     actor TEXT,
     sale_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS login_throttle (
+    key TEXT PRIMARY KEY,
+    fails INTEGER NOT NULL DEFAULT 0,
+    started REAL NOT NULL DEFAULT 0,
+    locked REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS shifts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1260,23 +1318,35 @@ def product_adjust(pid):
         except ValueError:
             qty = -1
         direction = request.form.get("direction")
-        if qty <= 0:
+        if direction not in ("in", "out"):
+            flash("Pick stock in or stock out.", "error")
+        elif qty <= 0:
             flash("Quantity must be a positive whole number.", "error")
-        elif direction != "in" and not is_admin():
-            # cashiers restock; taking stock out (damage, loss, shrinkage) needs the admin tier
-            gate = admin_gate()
-            if gate:
-                return gate
-        elif direction == "out" and qty > p["qty"]:
-            flash(f"Cannot remove {qty} - only {p['qty']} in stock.", "error")
         else:
-            new_qty = p["qty"] + (qty if direction == "in" else -qty)
-            log_stock(d, pid, new_qty - p["qty"],
-                      (request.form.get("reason") or "manual adjustment").strip()[:200])
-            d.execute("UPDATE products SET qty = ? WHERE id = ?", (new_qty, pid))
-            d.commit()
-            flash(f"Stock updated: {p['name']} now {new_qty}.", "ok")
-            return redirect(url_for("inventory"))
+            if direction == "out" and not is_admin():
+                # cashiers restock; taking stock out (damage, loss, shrinkage) needs the admin tier
+                gate = admin_gate()
+                if gate:
+                    return gate          # PIN accepted -> falls through and applies at once
+            delta = qty if direction == "in" else -qty
+            reason = (request.form.get("reason") or "manual adjustment").strip()[:200]
+            try:
+                # Relative update in one transaction: a sale landing between the page
+                # load and this POST is never overwritten, and stock can't go negative.
+                d.script([
+                    ("INSERT INTO stock_guards (id) SELECT 1 FROM products"
+                     " WHERE id = ? AND qty + ? < 0", (pid, delta)),
+                    (LOG_SQL, log_params(pid, delta, reason)),
+                    ("UPDATE products SET qty = qty + ? WHERE id = ?", (delta, pid)),
+                ])
+            except sqlite3.IntegrityError:
+                now = d.execute("SELECT qty FROM products WHERE id = ?", (pid,)).fetchone()
+                flash(f"Cannot remove {qty} - only {now['qty'] if now else 0} in stock.", "error")
+            else:
+                now = d.execute("SELECT qty FROM products WHERE id = ?", (pid,)).fetchone()
+                flash(f"Stock updated: {p['name']} now {now['qty']}.", "ok")
+                return redirect(url_for("inventory"))
+            p = d.execute("SELECT * FROM products WHERE id = ?", (pid,)).fetchone()
     return render_template("adjust.html", p=p)
 
 

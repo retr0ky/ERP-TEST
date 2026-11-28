@@ -6,12 +6,13 @@
 <form method="post" class="form">
 {{ csrf_field }}
   <label class="radio"><input type="radio" name="direction" value="in" checked> Stock in (received / correction up)</label>
-  {% if is_admin %}
-  <label class="radio"><input type="radio" name="direction" value="out"> Stock out (damaged, lost, used / correction down)</label>
+  {% if is_admin or ADMIN_ON %}
+  <label class="radio"><input type="radio" name="direction" value="out"> Stock out (damaged, lost, used / correction down){% if not is_admin %} <span class="muted small">- asks for the manager PIN</span>{% endif %}</label>
   {% else %}
-  <p class="muted small">Cashiers can only stock in. Stock out needs a manager PIN.</p>
+  <p class="muted small">Cashiers can only stock in. Stock out needs an admin.</p>
   {% endif %}
   <label>Quantity<input name="qty" type="number" min="1" value="1" autofocus required></label>
+  <label>Reason<input name="reason" maxlength="200" placeholder="e.g. delivery from supplier, damaged, stock count"></label>
   <div class="row">
     <button class="btn">Apply</button>
     <a class="btn ghost" href="{{ url_for('inventory') }}">Back to inventory</a>
