@@ -60,6 +60,9 @@
   const products = {{ prodlist | tojson }};
 
   let picked = null;   // {id, name}
+  // Product names are typed by staff - never put them into innerHTML unescaped.
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g,
+    (ch) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
   let matches = [];
 
   function refresh(row) {
@@ -85,11 +88,11 @@
     row.className = 'comp';
     row.dataset.pid = pid;
     row.innerHTML = `
-      <span>${names[pid] || 'Product'}</span>
-      <input type="number" min="1" value="${q}" data-qty>
+      <span>${esc(names[pid] || 'Product')}</span>
+      <input type="number" min="1" value="${esc(q)}" data-qty>
       <button class="btn tiny danger" type="button" data-remove>Remove</button>
-      <input type="hidden" name="component_id" value="${pid}">
-      <input type="hidden" name="component_qty" value="${q}">`;
+      <input type="hidden" name="component_id" value="${esc(pid)}">
+      <input type="hidden" name="component_qty" value="${esc(q)}">`;
     comps.insertBefore(row, compEmpty);
     syncEmpty();
   }
@@ -116,10 +119,10 @@
       return;
     }
     results.innerHTML = matches.map(p => `
-      <button class="comp-hit" type="button" data-pid="${p.id}">
-        <span class="cname">${p.name}</span>
-        <span class="cmeta">${[p.brand, p.model, p.sku].filter(Boolean).join(' · ')}</span>
-        <span class="cstock">${p.qty} in stock</span>
+      <button class="comp-hit" type="button" data-pid="${esc(p.id)}">
+        <span class="cname">${esc(p.name)}</span>
+        <span class="cmeta">${esc([p.brand, p.model, p.sku].filter(Boolean).join(' · '))}</span>
+        <span class="cstock">${esc(p.qty)} in stock</span>
         <span class="cprice">${Number(p.price).toFixed(2)}</span>
       </button>`).join('');
     if (picked && !matches.some(m => String(m.id) === String(picked.id))) picked = null;
