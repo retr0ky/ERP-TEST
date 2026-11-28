@@ -264,6 +264,18 @@ chk(lg == stamp, "its stock log carries the same timestamp", (lg, stamp))
 chk(A.DEBUG_MODE is False, "debug mode is off unless ERP_DEBUG=1")
 
 
+# ------------------------------------------------------------ money input
+c = client()
+for bad in ("nan", "inf", "1e9", "-5", "1.2.3"):
+    post(c, "/inventory/new", {"name": f"Bad {bad}", "price": bad, "qty": "1"})
+    chk(q1("SELECT 1 FROM products WHERE name=?", (f"Bad {bad}",)) is None,
+        f"product price '{bad}' is refused")
+post(c, "/inventory/new", {"name": "Good Price", "price": "1,900,000", "cost": "12.5", "qty": "1"})
+row = q1("SELECT price, cost FROM products WHERE name='Good Price'")
+chk(row is not None and tuple(row) == (1900000.0, 12.5), "1,900,000 and 12.5 are accepted",
+    tuple(row) if row else None)
+
+
 # --------------------------------------------------------------------------- done
 print("\nFAILS:", fails or "none")
 sys.exit(1 if fails else 0)

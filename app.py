@@ -5,9 +5,11 @@ Two roles:
   cashier - sell, restock (stock in), add fresh products, view inventory and sales
 Run:  python3 app.py          -> http://127.0.0.1:5000
 """
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import time
 from pathlib import Path
@@ -64,8 +66,6 @@ def money(value):
     return f"{value:,.2f}{CURRENCY}"
 
 
-import hmac
-import secrets
 
 PUBLIC = os.environ.get("ERP_PUBLIC") == "1"
 # Off unless asked for: the Werkzeug debugger is a remote Python console for anyone who
@@ -783,29 +783,12 @@ SAFE_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def ident(name):
-    """Table / column name veto. sqllit() quotes values; it says nothing about
-    identifiers, so anything built from a dynamic name has to pass here first."""
+    """Table / column name veto - identifiers can't be bound as parameters, so any
+    SQL built from a dynamic name has to pass here first."""
     name = str(name)
     if not SAFE_IDENT.match(name):
         raise ValueError(f"refusing unsafe SQL identifier: {name!r}")
     return name
-
-
-def sqllit(value):
-    """Safe SQL literal - names, notes and amounts go into a script as literals.
-
-    Values only - numbers print through int()/repr(), strings get quoted and
-    escaped. Never point it at a table or column name; use ident() for those.
-    """
-    if value is None:
-        return "NULL"
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return repr(value)
-    return "'" + str(value).replace("\x00", "").replace("'", "''") + "'"
 
 
 LOG_SQL = """INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id,
@@ -960,10 +943,10 @@ def product_stamp(sku, name, barcode, brand):
 
 
 def add_columns(conn, table, columns):
-    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({ident(table)})")}
     for name, decl in columns:
         if name not in have:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            conn.execute(f"ALTER TABLE {ident(table)} ADD COLUMN {ident(name)} {decl}")
 
 
 def backfill_search(conn):
@@ -1251,14 +1234,18 @@ def product_form_errors(form):
     name = (form.get("name") or "").strip()
     if not name:
         return "Name is required."
+    # parse_amount, not float(): float() takes 'nan', 'inf' and '1e9', and a NaN price
+    # would poison every total it touches.
+    cost = parse_amount(form.get("cost") or "0")
+    price = parse_amount(form.get("price") or "0")
     try:
-        cost = float(form.get("cost") or 0)
-        price = float(form.get("price") or 0)
         qty = int(form.get("qty") or 0)
         low = int(form.get("low_stock_at") or 5)
     except ValueError:
-        return "Cost, price and quantities must be numbers."
-    if cost < 0 or price < 0 or qty < 0 or low < 0:
+        qty = low = None
+    if cost is None or price is None or qty is None or low is None:
+        return "Cost and price must be amounts (up to 2 decimals), quantities whole numbers."
+    if qty < 0 or low < 0:
         return "Values cannot be negative."
     return None
 
@@ -1266,8 +1253,8 @@ def product_form_errors(form):
 def form_values(form):
     return ((form.get("sku") or "").strip() or None,
             (form.get("name") or "").strip(),
-            float(form.get("cost") or 0),
-            float(form.get("price") or 0),
+            parse_amount(form.get("cost") or "0"),
+            parse_amount(form.get("price") or "0"),
             int(form.get("qty") or 0),
             int(form.get("low_stock_at") or 5),
             (form.get("barcode") or "").strip() or None,
@@ -2221,7 +2208,9 @@ def parse_amount(raw):
     raw = (raw or "").strip().replace(",", "").replace(CURRENCY, "")
     if not AMOUNT_RE.match(raw):
         return None
-    return float(raw)
+    # Amounts are stored as REAL. Rounding to whole cents on the way in keeps every
+    # stored value exact enough that sums never drift (tugrik prices are whole anyway).
+    return round(float(raw), 2)
 
 
 @app.route("/pos/pay", methods=["POST"])
