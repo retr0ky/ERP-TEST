@@ -39,9 +39,21 @@ CURRENCY = "₮"
 VAT_PERCENT = 10.0
 
 
+SHOP_TZ_NAME = os.environ.get("ERP_TZ") or "Asia/Ulaanbaatar"
+try:
+    from zoneinfo import ZoneInfo
+    SHOP_TZ = ZoneInfo(SHOP_TZ_NAME)
+except Exception:                     # no tz database at all - fall back to the server clock
+    SHOP_TZ = None
+
+
 def now_local():
-    """Timestamp in the same text format SQLite's datetime() writes."""
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+    """Shop-local time, in the same text format SQLite's datetime() writes.
+
+    SQLite's datetime('now','localtime') means the *server's* zone - UTC on Vercel and
+    Turso - so every timestamp is written from here instead (ERP_TZ, default Ulaanbaatar)."""
+    from datetime import datetime
+    return datetime.now(SHOP_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def money(value):
@@ -56,7 +68,9 @@ import hmac
 import secrets
 
 PUBLIC = os.environ.get("ERP_PUBLIC") == "1"
-DEBUG_MODE = os.environ.get("ERP_DEBUG", "1" if not PUBLIC else "0") == "1"
+# Off unless asked for: the Werkzeug debugger is a remote Python console for anyone who
+# can reach the port (ERP_HOST=0.0.0.0 on a shop network, for one).
+DEBUG_MODE = os.environ.get("ERP_DEBUG") == "1" and not PUBLIC
 PASSWORD = os.environ.get("ERP_PASSWORD") or ""
 
 app = Flask(__name__)
@@ -173,8 +187,8 @@ def seed_users(conn):
     generated = not password
     if generated:
         password = secrets.token_urlsafe(9)
-    conn.execute("INSERT INTO users (username, pass_hash, role) VALUES (?, ?, 'admin')",
-                 (name, generate_password_hash(password)))
+    conn.execute("INSERT INTO users (username, pass_hash, role, created_at) VALUES (?, ?, 'admin', ?)",
+                 (name, generate_password_hash(password), now_local()))
     conn.commit()
     app.logger.info("seeded admin account '%s' from %s", name,
                     "ERP_ADMIN_PASSWORD" if os.environ.get("ERP_ADMIN_PASSWORD")
@@ -240,8 +254,8 @@ def login():
             session["cart"] = {}           # every cashier starts on a clean till
             session["sets"] = {}
             session["payments"] = []
-            db().execute("UPDATE users SET last_login = datetime('now','localtime') WHERE id = ?",
-                         (row["id"],))
+            db().execute("UPDATE users SET last_login = ? WHERE id = ?",
+                         (now_local(), row["id"]))
             db().commit()
             return redirect(safe_next(request.form.get("nxt")) or nxt)
         throttle_fail(ip)
@@ -381,8 +395,8 @@ def account_new():
         flash(err, "error")
         return redirect(url_for("accounts"))
     try:
-        db().execute("INSERT INTO users (username, pass_hash, role) VALUES (?, ?, ?)",
-                     (username, generate_password_hash(password), role))
+        db().execute("INSERT INTO users (username, pass_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                     (username, generate_password_hash(password), role, now_local()))
         db().commit()
         flash(f"Account {username} created as {role}.", "ok")
     except sqlite3.IntegrityError:
@@ -794,12 +808,13 @@ def sqllit(value):
     return "'" + str(value).replace("\x00", "").replace("'", "''") + "'"
 
 
-LOG_SQL = """INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
-             SELECT id, qty, qty + ?, ?, ?, ?, ? FROM products WHERE id = ?"""
+LOG_SQL = """INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id,
+                                        created_at)
+             SELECT id, qty, qty + ?, ?, ?, ?, ?, ? FROM products WHERE id = ?"""
 
 
 def log_params(pid, delta, reason, sale_id=None, who=None):
-    return (delta, delta, reason, who or actor(), sale_id, pid)
+    return (delta, delta, reason, who or actor(), sale_id, now_local(), pid)
 
 
 def log_stock(conn, pid, delta, reason, sale_id=None):
@@ -1280,16 +1295,16 @@ def product_new():
             cur = db().execute(
                 """INSERT INTO products (sku, name, cost, price, qty, low_stock_at, barcode,
                                          brand, model, specifications, category_id, supplier_id,
-                                         active, n_search, n_sku, n_barcode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
-                (*values, *product_stamp(values[0], values[1], values[6], values[7])))
+                                         active, n_search, n_sku, n_barcode, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                (*values, *product_stamp(values[0], values[1], values[6], values[7]), now_local()))
             new_id = cur.lastrowid
             if values[4]:
                 # the opening stock is a stock move like any other
                 db().execute("""INSERT INTO inventory_logs
-                                (product_id, old_qty, new_qty, delta, reason, actor)
-                                VALUES (?, 0, ?, ?, 'new product', ?)""",
-                             (new_id, values[4], values[4], actor()))
+                                (product_id, old_qty, new_qty, delta, reason, actor, created_at)
+                                VALUES (?, 0, ?, ?, 'new product', ?, ?)""",
+                             (new_id, values[4], values[4], actor(), now_local()))
             db().commit()
         except sqlite3.IntegrityError:
             db().rollback()
@@ -1316,10 +1331,10 @@ def product_edit(pid):
             # Typing a new number on the form is still a stock move - log it against the
             # stock as it is right now (a sale may have landed since the form opened).
             db().execute("""INSERT INTO inventory_logs
-                            (product_id, old_qty, new_qty, delta, reason, actor)
-                            SELECT id, qty, ?, ? - qty, 'edited on product form', ?
+                            (product_id, old_qty, new_qty, delta, reason, actor, created_at)
+                            SELECT id, qty, ?, ? - qty, 'edited on product form', ?, ?
                             FROM products WHERE id = ? AND qty <> ?""",
-                         (values[4], values[4], actor(), pid, values[4]))
+                         (values[4], values[4], actor(), now_local(), pid, values[4]))
             db().execute(
                 """UPDATE products SET sku=?, name=?, cost=?, price=?, qty=?, low_stock_at=?,
                        barcode=?, brand=?, model=?, specifications=?, category_id=?, supplier_id=?,
@@ -1420,7 +1435,8 @@ def category_add():
         flash("Category name is required.", "error")
     else:
         try:
-            db().execute("INSERT INTO categories (name) VALUES (?)", (name,))
+            db().execute("INSERT INTO categories (name, created_at) VALUES (?, ?)",
+                         (name, now_local()))
             db().commit()
             flash("Category added.", "ok")
         except sqlite3.IntegrityError:
@@ -1524,8 +1540,8 @@ def set_new():
                                active_products(), url_for("set_new"), "Create set")
     conn = db()
     try:
-        cur = conn.execute("INSERT INTO sets (name, description, price) VALUES (?, ?, ?)",
-                           (name, desc or None, price))
+        cur = conn.execute("INSERT INTO sets (name, description, price, created_at)"
+                           " VALUES (?, ?, ?, ?)", (name, desc or None, price, now_local()))
         sid = cur.lastrowid
         save_set_components(conn, sid, comps)
         conn.commit()
@@ -2117,7 +2133,8 @@ def pos_hold():
     # v travels with the blob: a held cart written by an older build is recognisable
     # at resume time instead of being merged into a cart shaped differently.
     data = json.dumps({"v": HELD_SCHEMA, "cart": cart, "sets": cart_sets, "payments": pays})
-    db().execute("INSERT INTO held_carts (label, data) VALUES (?, ?)", (label, data))
+    db().execute("INSERT INTO held_carts (label, data, created_at) VALUES (?, ?, ?)",
+                 (label, data, now_local()))
     db().commit()
     session["cart"] = {}
     session["sets"] = {}
@@ -2477,11 +2494,13 @@ def checkout_statements(sale_id, ref, entries, cart_sets, need_lines, pays, pm_m
             "INSERT INTO stock_guards (id) SELECT 1 FROM need "
             "WHERE COALESCE((SELECT qty FROM products WHERE id = need.pid), -1) < need.qty",
             [v for pid, qty in need_lines for v in (pid, qty)]))
+    stamp = now_local()
     stmts.append(("""INSERT INTO sales (id, ref, total, paid, change, item_count, vat_amount,
-                                        customer_phone, customer_note, n_search)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        customer_phone, customer_note, n_search, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                   (sale_id, ref, total, paid, max(paid - total, 0), item_count, vat,
-                   cust_phone or None, cust_note or None, blob_of(ref, cust_phone, cust_note))))
+                   cust_phone or None, cust_note or None, blob_of(ref, cust_phone, cust_note),
+                   stamp)))
     stmts.append(("""INSERT INTO sale_items (sale_id, product_id, name, price, qty, line_total, n_name)
                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
                   [(sale_id, p["id"], p["name"], p["price"], qty,
@@ -2492,9 +2511,10 @@ def checkout_statements(sale_id, ref, entries, cart_sets, need_lines, pays, pm_m
                         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)""",
                       [(sale_id, s["id"], s["name"], s["unit_price"], qty,
                         round(s["unit_price"] * qty, 2), norm(s["name"])) for s, qty in cart_sets]))
-    stmts.append(("""INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor, sale_id)
-                    SELECT id, qty, qty - ?, ?, 'sale', ?, ? FROM products WHERE id = ?""",
-                  [(qty, -qty, who, sale_id, pid) for pid, qty in need_lines]))
+    stmts.append(("""INSERT INTO inventory_logs (product_id, old_qty, new_qty, delta, reason, actor,
+                                                sale_id, created_at)
+                    SELECT id, qty, qty - ?, ?, 'sale', ?, ?, ? FROM products WHERE id = ?""",
+                  [(qty, -qty, who, sale_id, stamp, pid) for pid, qty in need_lines]))
     stmts.append(("UPDATE products SET qty = qty - ? WHERE id = ? AND qty >= ?",
                   [(qty, pid, qty) for pid, qty in need_lines]))
     pay_rows = []

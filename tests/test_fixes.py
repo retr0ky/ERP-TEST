@@ -251,6 +251,19 @@ chk(q1("SELECT product_id FROM sale_items WHERE id=?", (item,))[0] is None,
 chk(A.connect().execute("PRAGMA foreign_keys").fetchone()[0] == 1, "connections enable foreign keys")
 
 
+# ------------------------------------------------------------ shop-local time, debug off
+from datetime import datetime, timedelta, timezone
+ub = datetime.now(timezone(timedelta(hours=8)))       # Ulaanbaatar has no DST
+p2 = product("Clock Widget", 2)
+sid = sell(cart={str(p2): 1})
+stamp = q1("SELECT created_at FROM sales WHERE id=?", (sid,))[0]
+got = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=8)))
+chk(abs((got - ub).total_seconds()) < 120, "sale time is Ulaanbaatar time", (stamp, ub))
+lg = q1("SELECT created_at FROM inventory_logs WHERE sale_id=?", (sid,))[0]
+chk(lg == stamp, "its stock log carries the same timestamp", (lg, stamp))
+chk(A.DEBUG_MODE is False, "debug mode is off unless ERP_DEBUG=1")
+
+
 # --------------------------------------------------------------------------- done
 print("\nFAILS:", fails or "none")
 sys.exit(1 if fails else 0)
