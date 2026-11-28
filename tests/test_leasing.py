@@ -1,6 +1,12 @@
 import re, sqlite3, sys
 import os
 os.environ["TURSO_URL"] = ""
+# Work on a throwaway copy of the shop database - never the real erp.db.
+_here = __import__("pathlib").Path(__file__).resolve().parent
+_copy = _here / "test_leasing.db"
+__import__("shutil").copyfile(_here.parent / "erp.db", _copy)
+os.environ["ERP_DB"] = str(_copy)
+os.environ.setdefault("ERP_DEBUG", "0")
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 import app as A
 
